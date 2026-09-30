@@ -1,0 +1,1 @@
+"""Modules du prototype local."""
