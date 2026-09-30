@@ -1,0 +1,37 @@
+# Données de séance et artefacts locaux : ne jamais les publier dans Git.
+data/
+captures/
+exports/
+backups/
+logs/
+tmp/
+*.sqlite
+*.sqlite3
+*.db
+*.mp4
+*.mov
+*.avi
+*.webm
+
+# Secrets, certificats et modèles installés localement.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.gguf
+*.safetensors
+*.onnx
+*.pt
+*.pth
+
+# Artefacts de développement.
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.venv/
+node_modules/
+dist/
+build/

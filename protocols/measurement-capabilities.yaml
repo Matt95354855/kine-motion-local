@@ -1,0 +1,64 @@
+# Inventaire conceptuel : aucun indicateur n'est encore validé pour un usage clinique.
+schema_version: "0.1"
+categories:
+  - observable
+  - estimable_under_conditions
+  - declarative
+  - manual
+  - not_covered
+items:
+  - id: apparent_elbow_angle
+    category: estimable_under_conditions
+    source: algorithm
+    conditions: [visible_landmarks, defined_camera_view, near_measurement_plane, complete_protocol]
+    display_label: Angle apparent du coude dans ce protocole
+  - id: apparent_knee_angle
+    category: estimable_under_conditions
+    source: algorithm
+    conditions: [visible_landmarks, defined_camera_view, near_measurement_plane, complete_protocol]
+    display_label: Angle apparent du genou dans ce protocole
+  - id: observed_active_excursion
+    category: estimable_under_conditions
+    source: algorithm
+    conditions: [complete_protocol, sufficient_capture_quality, no_stop]
+    display_label: Excursion active observée pendant l'essai
+  - id: repetitions_and_duration
+    category: estimable_under_conditions
+    source: algorithm
+    conditions: [valid_segmentation, reliable_capture_timestamps]
+    display_label: Répétitions et durée de l'essai
+  - id: side_difference
+    category: estimable_under_conditions
+    source: algorithm
+    conditions: [same_protocol, same_angle_convention, comparable_capture_quality]
+    display_label: Différence descriptive entre côtés
+  - id: visible_trunk_inclination
+    category: estimable_under_conditions
+    source: algorithm
+    conditions: [defined_observation_rule, validated_camera_view]
+    display_label: Inclinaison visible du tronc à vérifier
+  - id: pain_or_discomfort
+    category: declarative
+    source: patient_reported
+    conditions: [explicit_response_or_not_answered_status]
+    display_label: Douleur ou gêne déclarée
+  - id: passive_range
+    category: manual
+    source: manual
+    conditions: [professional_method_recorded]
+    display_label: Amplitude passive renseignée par le professionnel
+  - id: muscle_strength
+    category: not_covered
+    source: none
+    conditions: []
+    display_label: Force musculaire réelle non mesurée par la caméra RGB
+  - id: internal_force_or_torque
+    category: not_covered
+    source: none
+    conditions: []
+    display_label: Force ou couple interne non couvert par le prototype
+  - id: lesion_or_diagnosis
+    category: not_covered
+    source: none
+    conditions: []
+    display_label: Lésion ou diagnostic non déduit de la vidéo
