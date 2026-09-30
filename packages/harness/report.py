@@ -10,6 +10,8 @@ REASON_LABELS = {
     "insufficient_frames": "nombre d'images insuffisant",
     "invalid_timestamps": "horodatages incohérents",
     "not_performed": "mouvement non réalisé",
+    "no_pose": "aucune personne détectée",
+    "multiple_people": "plusieurs personnes détectées",
     "occlusion": "repère masqué",
     "out_of_frame": "repère hors du cadre",
     "out_of_plane": "mouvement hors du plan défini",

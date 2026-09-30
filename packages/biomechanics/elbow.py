@@ -68,10 +68,15 @@ def assess_elbow_trial(trial: ElbowTrial) -> Measurement:
         return result(MeasurementStatus.REJECTED, reasons=("camera_stability_unverified",))
     if any(frame.camera_stable is False for frame in trial.frames):
         return result(MeasurementStatus.REJECTED, reasons=("camera_moved",))
+    if any(frame.quality_reason == "multiple_people" for frame in trial.frames):
+        return result(MeasurementStatus.REJECTED, reasons=("multiple_people",))
 
     accepted: list[tuple[float, int]] = []
     reasons: set[str] = set()
     for frame in trial.frames:
+        if frame.quality_reason:
+            reasons.add(frame.quality_reason)
+            continue
         if frame.shoulder is None or frame.elbow is None or frame.wrist is None:
             reasons.add("occlusion")
             continue

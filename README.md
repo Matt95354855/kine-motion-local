@@ -2,7 +2,7 @@
 
 Prototype d'assistant local de bilan fonctionnel pour kinésithérapeute. Le projet vise à décrire certains mouvements filmés selon des protocoles définis, à préparer un brouillon de compte rendu et à présenter les preuves nécessaires à sa revue par le professionnel.
 
-Le dépôt possède maintenant un premier calcul expérimental, exécuté uniquement sur des repères synthétiques. Il n'y a pas encore de capture vidéo, de moteur de pose, d'interface de revue ou de validation clinique. Le premier parcours visé est supervisé au cabinet, avec une personne et une caméra. Il devra rester utilisable sans Internet et sans modèle de langage.
+Le dépôt possède un parcours expérimental local : webcam ou vidéo choisie dans le navigateur, échantillonnage d'images, moteur de pose interchangeable, calcul d'angle apparent, contrôle de qualité, brouillon déterministe et harness pour LLM local. Aucune précision clinique n'est établie. Il n'y a pas encore de dossier patient, de stockage, de revue clinique complète ni de programme d'exercices.
 
 ## Exécuter le prototype actuel
 
@@ -15,7 +15,25 @@ python3 -m unittest discover -s tests -v
 
 La démo construit trois images de pose fictives, calcule un angle apparent de flexion du coude, rattache la valeur à son image d'origine et imprime un compte rendu marqué « brouillon non validé ». Le code utilise uniquement la bibliothèque standard de Python ; aucun téléchargement ou service externe n'est nécessaire à cette démo.
 
-Les contrôles de qualité sont encore des entrées explicites de l'essai : le logiciel ne sait pas encore détecter automatiquement si la vue est correcte ou si la caméra a bougé. Leur absence bloque la mesure. Les règles provisoires de trois images exploitables et de couverture de 80 % servent uniquement aux tests du prototype ; elles ne sont pas des seuils cliniques validés.
+Pour vérifier le parcours navigateur et API sans modèle de pose, lancer :
+
+```sh
+python3 -m services.api.server --demo-pose
+```
+
+Ouvrir ensuite `http://127.0.0.1:8765`. Le mode `--demo-pose` **ignore les pixels** et fabrique une pose : il vérifie le transport et l'interface, pas l'analyse de la vidéo. Le navigateur demande seulement la caméra vidéo, avec `audio: false`, ou lit un fichier vidéo local. Il envoie des JPEG échantillonnés au serveur lié à `127.0.0.1` ; le serveur ne les enregistre pas sur disque. La prévisualisation webcam est en miroir, mais les images analysées ne le sont pas.
+
+Un adaptateur [MediaPipe Pose Landmarker](https://developers.google.com/edge/mediapipe/solutions/vision/pose_landmarker/python) peut analyser les pixels si les dépendances compatibles et un modèle `.task` sont déjà installés localement :
+
+```sh
+python3 -m services.api.server --pose-model /chemin/vers/pose_landmarker.task --experimental-pose
+```
+
+Cet adaptateur n'a pas été exécuté sur le poste cible. Les versions des dépendances, les licences du modèle, la précision et le trafic réseau doivent être vérifiés avant toute capture réelle. La [documentation du paquet MediaPipe](https://pypi.org/project/mediapipe/) indique l'envoi de métriques d'utilisation à Google : le mode réel n'est donc pas déclaré conforme à l'objectif « aucun trafic externe » tant que ce point n'est pas résolu et testé. Aucun modèle n'est téléchargé automatiquement.
+
+Les contrôles de vue de profil et de stabilité de caméra restent des confirmations manuelles après l'essai. S'ils ne sont pas confirmés, aucune valeur n'est publiée. Les règles provisoires de trois images exploitables et de couverture de 80 % servent uniquement aux tests ; elles ne sont pas des seuils cliniques validés. Une deuxième personne détectée entraîne un refus. Les captures ne sont pas conservées, hormis une image de preuve en mémoire jusqu'à l'expiration de la séance ou son remplacement.
+
+Le harness [décrit ici](docs/tool-integration.md) expose uniquement des outils de lecture liés à la séance. Sans LLM, le brouillon déterministe reste disponible. Un serveur local compatible `llama.cpp` peut être configuré avec `--llm-url http://127.0.0.1:8080 --llm-model NOM`. L'option supplémentaire `--llm-vision` autorise l'envoi d'une unique image de preuve à un modèle visuel local compatible ; elle est désactivée par défaut. La note du modèle reste distincte du brouillon et doit être revue. Aucune intégration avec un vrai modèle ou avec les outils futurs de l'utilisateur n'a encore été validée.
 
 ## Documents de départ
 

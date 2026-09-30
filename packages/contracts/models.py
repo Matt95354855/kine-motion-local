@@ -44,6 +44,7 @@ class PoseFrame:
     wrist: Point2D | None
     view_is_valid: bool | None = None
     camera_stable: bool | None = None
+    quality_reason: str | None = None
 
     def __post_init__(self) -> None:
         if self.sequence < 0 or not isfinite(self.timestamp_ms) or self.timestamp_ms < 0:

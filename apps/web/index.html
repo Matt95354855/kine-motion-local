@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>kiné motion local — prototype</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <main>
+    <header>
+      <p class="eyebrow">Prototype local · usage expérimental</p>
+      <h1>Analyse de mouvement</h1>
+      <p>Flexion active du coude, une personne et une caméra. Les résultats exigent une revue professionnelle. N'utilisez pas de dossier patient réel dans cette version.</p>
+      <p id="engine-status" class="status">Vérification du moteur…</p>
+    </header>
+
+    <section aria-labelledby="capture-title">
+      <h2 id="capture-title">Capture</h2>
+      <label for="side">Côté anatomique observé</label>
+      <select id="side">
+        <option value="left">Gauche</option>
+        <option value="right">Droit</option>
+      </select>
+      <div class="actions">
+        <button id="camera-start">Ouvrir la webcam</button>
+        <label class="file-button" for="video-file">Choisir une vidéo locale</label>
+        <input id="video-file" type="file" accept="video/*">
+      </div>
+      <p class="hint">Le microphone n'est pas demandé. La vidéo et les images ne sont pas enregistrées par l'application ; seules des images échantillonnées sont analysées en mémoire par le serveur local.</p>
+      <video id="preview" autoplay playsinline muted></video>
+      <p id="capture-details" class="status">Aucune capture en cours.</p>
+      <p id="frame-status" class="status" aria-live="polite"></p>
+
+      <div class="confirmation">
+        <label><input id="view-confirmed" type="checkbox"> Je confirme que le mouvement est resté dans la vue de profil prévue.</label>
+        <label><input id="stable-confirmed" type="checkbox"> Je confirme que la caméra est restée stable pendant cet essai.</label>
+      </div>
+      <div class="actions">
+        <button id="finish" disabled>Terminer et calculer</button>
+        <button id="stop" class="danger" disabled>Arrêt immédiat</button>
+      </div>
+    </section>
+
+    <section aria-labelledby="result-title">
+      <h2 id="result-title">Résultat et brouillon</h2>
+      <p id="measurement-status" class="status">Aucun essai terminé.</p>
+      <pre id="draft"></pre>
+      <button id="llm-draft" disabled>Demander une note au LLM local</button>
+      <p class="hint">Si le mode visuel est activé au démarrage du serveur, cette action transmet une image de preuve au modèle local. La note obtenue reste à vérifier.</p>
+      <p id="llm-status" class="status"></p>
+      <pre id="llm-note"></pre>
+    </section>
+  </main>
+</body>
+</html>

@@ -1,0 +1,1 @@
+"""Services locaux du prototype."""
