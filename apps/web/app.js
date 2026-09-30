@@ -13,6 +13,7 @@ let sequence = 0;
 let startedAt = 0;
 let mode = null;
 let ending = false;
+let models = [];
 
 async function request(path, options = {}) {
   const response = await fetch(path, { cache: "no-store", ...options });
@@ -27,6 +28,17 @@ function jsonPost(path, document) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(document),
   });
+}
+
+function updateModelSelection() {
+  const selected = models.find((item) => item.id === $("llm-model").value);
+  const imageAvailable = Boolean(selected?.image_enabled);
+  $("include-image").disabled = !imageAvailable;
+  if (!imageAvailable) $("include-image").checked = false;
+  $("check-model").disabled = !selected?.configured;
+  $("model-status").textContent = !selected?.configured ?
+    "Modèle non configuré ; le brouillon déterministe reste disponible." :
+    `${selected.label} configuré, disponibilité non encore vérifiée.`;
 }
 
 function releaseMedia() {
@@ -172,14 +184,34 @@ $("camera-start").addEventListener("click", () => begin("camera"));
 $("video-file").addEventListener("change", () => begin("file"));
 $("finish").addEventListener("click", () => finishSession(false));
 $("stop").addEventListener("click", () => finishSession(true));
+$("llm-model").addEventListener("change", updateModelSelection);
+$("check-model").addEventListener("click", async () => {
+  const selected = $("llm-model").value;
+  $("model-status").textContent = "Vérification du serveur local…";
+  try {
+    const result = await jsonPost("/api/models/check", { model_id: selected });
+    const labels = {
+      ready: "Modèle détecté sur le serveur local.",
+      model_not_advertised: "Serveur joignable, mais ce nom de modèle n'est pas annoncé.",
+      runtime_unreachable: "Serveur du modèle inaccessible ou réponse invalide.",
+      not_configured: "Modèle non configuré.",
+    };
+    if ($("llm-model").value === selected) $("model-status").textContent = labels[result.state] || result.state;
+  } catch (error) { $("model-status").textContent = `Vérification impossible : ${error.message}`; }
+});
 $("llm-draft").addEventListener("click", async () => {
   if (!session) return;
   $("llm-status").textContent = "Consultation du harness local…";
   try {
-    const result = await jsonPost("/api/harness/draft", session);
+    const result = await jsonPost("/api/harness/draft", {
+      ...session,
+      model_id: $("llm-model").value,
+      include_image: $("include-image").checked,
+    });
     $("llm-note").textContent = result.proposed_note || "Aucune note du modèle ; brouillon déterministe conservé.";
     $("llm-status").textContent = result.fallback_reason ?
-      `Repli utilisé : ${result.fallback_reason}` : "Note proposée pour revue professionnelle.";
+      `Repli utilisé : ${result.fallback_reason}` :
+      `Note proposée pour revue professionnelle${result.image_sent ? " · une image transmise localement" : " · aucune image transmise"}.`;
   } catch (error) { $("llm-status").textContent = `Harness indisponible : ${error.message}`; }
 });
 window.addEventListener("pagehide", () => {
@@ -190,5 +222,16 @@ window.addEventListener("pagehide", () => {
   releaseMedia();
 });
 request("/api/status").then((status) => {
-  $("engine-status").textContent = `Pose : ${status.pose_mode} · LLM local : ${status.llm_configured ? "configuré" : "absent (repli disponible)"} · Image au LLM : ${status.llm_vision ? "activée" : "désactivée"}`;
+  models = status.models || [];
+  $("llm-model").replaceChildren(...models.map((item) => {
+    const option = document.createElement("option");
+    option.value = item.id;
+    option.textContent = item.label;
+    return option;
+  }));
+  $("llm-model").disabled = models.length === 0;
+  const firstConfigured = models.find((item) => item.configured);
+  if (firstConfigured) $("llm-model").value = firstConfigured.id;
+  updateModelSelection();
+  $("engine-status").textContent = `Pose : ${status.pose_mode} · LLM local : ${status.llm_configured ? "configuré, non vérifié" : "absent (repli disponible)"}`;
 }).catch(() => { $("engine-status").textContent = "Serveur local indisponible."; });

@@ -26,8 +26,23 @@ class LocalLLMClient:
         if not model or timeout_seconds <= 0:
             raise ValueError("Modèle et délai requis")
         self.url = base_url.rstrip("/") + "/v1/chat/completions"
+        self.models_url = base_url.rstrip("/") + "/v1/models"
         self.model = model
         self.timeout_seconds = timeout_seconds
+
+    def check_model(self) -> bool:
+        """Vérifie le modèle annoncé sans transmettre de données de séance."""
+        request = Request(self.models_url, method="GET")
+        opener = build_opener(ProxyHandler({}), _NoRedirect())
+        with opener.open(request, timeout=min(self.timeout_seconds, 3.0)) as response:
+            body = response.read(64_001)
+        if len(body) > 64_000:
+            raise ValueError("Catalogue des modèles trop volumineux")
+        document = json.loads(body)
+        return any(
+            isinstance(item, dict) and item.get("id") == self.model
+            for item in document["data"]
+        )
 
     def complete(self, messages: list[dict], tools: list[dict]) -> dict:
         payload = json.dumps(
@@ -36,8 +51,7 @@ class LocalLLMClient:
                 "messages": messages,
                 "tools": tools,
                 "tool_choice": "auto",
-                "temperature": 0.2,
-                "max_tokens": 512,
+                "max_tokens": 2048,
                 "stream": False,
             }
         ).encode("utf-8")

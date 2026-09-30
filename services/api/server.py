@@ -4,8 +4,10 @@ import argparse
 import json
 import os
 from dataclasses import asdict
+from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.error import URLError
 from urllib.parse import urlsplit
 
 from packages.harness.local_llm import LocalLLMClient
@@ -19,12 +21,36 @@ ROOT = Path(__file__).resolve().parents[2]
 WEB = ROOT / "apps" / "web"
 
 
+@dataclass(frozen=True)
+class ModelBinding:
+    label: str
+    client: LocalLLMClient | None
+    supports_images: bool = False
+    image_enabled: bool = False
+
+
+def configured_models(
+    gpt_oss: LocalLLMClient | None = None,
+    qwen36: LocalLLMClient | None = None,
+    qwen_vision: bool = False,
+) -> dict[str, ModelBinding]:
+    return {
+        "gpt_oss": ModelBinding("GPT-OSS", gpt_oss),
+        "qwen36": ModelBinding("Qwen 3.6", qwen36, True, qwen_vision),
+    }
+
+
 def make_handler(
     manager: SessionManager,
     llm_client=None,
     pose_mode: str = "experimental",
     llm_vision: bool = False,
+    model_bindings: dict[str, ModelBinding] | None = None,
 ):
+    bindings = model_bindings or configured_models()
+    if llm_client is not None:
+        bindings = {**bindings, "custom": ModelBinding("Modèle local personnalisé", llm_client, llm_vision, llm_vision)}
+
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, _format: str, *_args) -> None:
             # Évite d'inscrire le détail des séances ou des images dans les logs.
@@ -83,8 +109,18 @@ def make_handler(
                 if path == "/api/status":
                     self._json(200, {
                         "pose_mode": pose_mode,
-                        "llm_configured": llm_client is not None,
-                        "llm_vision": llm_vision,
+                        "llm_configured": any(item.client is not None for item in bindings.values()),
+                        "llm_vision": any(item.image_enabled for item in bindings.values()),
+                        "models": [
+                            {
+                                "id": key,
+                                "label": item.label,
+                                "configured": item.client is not None,
+                                "supports_images": item.supports_images,
+                                "image_enabled": item.image_enabled and item.client is not None,
+                            }
+                            for key, item in bindings.items()
+                        ],
                     })
                     return
                 static = {
@@ -139,15 +175,39 @@ def make_handler(
                     self._json(200, {"cancelled": True})
                 elif path == "/api/harness/draft":
                     doc = self._document()
+                    model_id = doc.get("model_id")
+                    if model_id is None:
+                        model_id = "custom" if "custom" in bindings else "gpt_oss"
+                    if model_id not in bindings:
+                        raise ValueError("Modèle inconnu")
+                    binding = bindings[model_id]
+                    include_image = doc.get("include_image", False)
+                    if not isinstance(include_image, bool) or (include_image and (not binding.image_enabled or binding.client is None)):
+                        raise ValueError("Image non autorisée pour ce modèle")
                     session_id, token = doc.get("session_id", ""), doc.get("token", "")
                     measurement, keyframe = manager.completed_snapshot(session_id, token)
                     result = run_harness(
-                        ToolContext(session_id, measurement, keyframe if llm_vision else None),
-                        llm_client,
-                        allow_visual_evidence=llm_vision,
+                        ToolContext(session_id, measurement, keyframe if include_image else None),
+                        binding.client,
+                        allow_visual_evidence=include_image,
                     )
                     manager.get(session_id, token)  # Refuse une réponse pour une séance révoquée entre-temps.
-                    self._json(200, asdict(result))
+                    self._json(200, {**asdict(result), "model_id": model_id, "image_sent": include_image and binding.client is not None and keyframe is not None})
+                elif path == "/api/models/check":
+                    doc = self._document()
+                    model_id = doc.get("model_id")
+                    if model_id not in bindings:
+                        raise ValueError("Modèle inconnu")
+                    binding = bindings[model_id]
+                    if binding.client is None:
+                        self._json(200, {"model_id": model_id, "state": "not_configured"})
+                    else:
+                        try:
+                            available = binding.client.check_model()
+                            state = "ready" if available else "model_not_advertised"
+                        except (OSError, URLError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+                            state = "runtime_unreachable"
+                        self._json(200, {"model_id": model_id, "state": state})
                 else:
                     self._json(404, {"error": "not_found"})
             except PermissionError:
@@ -169,16 +229,30 @@ def main() -> None:
     parser.add_argument("--llm-url", default=os.environ.get("KINE_LLM_URL"))
     parser.add_argument("--llm-model", default=os.environ.get("KINE_LLM_MODEL"))
     parser.add_argument("--llm-vision", action="store_true", help="Autoriser une image de preuve vers un VLM local")
+    parser.add_argument("--gpt-oss-url", default=os.environ.get("KINE_GPT_OSS_URL"))
+    parser.add_argument("--gpt-oss-model", default=os.environ.get("KINE_GPT_OSS_MODEL", "gpt-oss-20b"))
+    parser.add_argument("--qwen-url", default=os.environ.get("KINE_QWEN36_URL"))
+    parser.add_argument("--qwen-model", default=os.environ.get("KINE_QWEN36_MODEL", "Qwen3.6-27B"))
+    parser.add_argument("--qwen-vision", action="store_true", help="Permettre l'envoi explicite d'une image au serveur Qwen local")
     args = parser.parse_args()
     if not args.pose_model and not args.demo_pose:
         parser.error("Un modèle local --pose-model est requis ; aucun téléchargement automatique")
     if not args.demo_pose and not args.experimental_pose:
         parser.error("MediaPipe reste expérimental : ajouter --experimental-pose après examen du trafic réseau")
     client = None
+    if bool(args.llm_url) != bool(args.llm_model):
+        parser.error("--llm-url et --llm-model doivent être fournis ensemble")
     if args.llm_url and args.llm_model:
         client = LocalLLMClient(args.llm_url, args.llm_model)
     if args.llm_vision and client is None:
         parser.error("--llm-vision exige --llm-url et --llm-model")
+    if args.qwen_vision and not args.qwen_url:
+        parser.error("--qwen-vision exige --qwen-url")
+    models = configured_models(
+        LocalLLMClient(args.gpt_oss_url, args.gpt_oss_model) if args.gpt_oss_url else None,
+        LocalLLMClient(args.qwen_url, args.qwen_model) if args.qwen_url else None,
+        args.qwen_vision,
+    )
     engine_factory = SyntheticPoseEngine if args.demo_pose else lambda: MediaPipePoseEngine(args.pose_model)
     manager = SessionManager(engine_factory)
     server = ThreadingHTTPServer(
@@ -188,6 +262,7 @@ def main() -> None:
             client,
             "synthetic_demo" if args.demo_pose else "mediapipe_experimental",
             args.llm_vision,
+            models,
         ),
     )
     print(f"Prototype local : http://127.0.0.1:{server.server_port}")

@@ -20,6 +20,8 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .status { color: #36594d; min-height: 1.5em; }
 .confirmation { display: grid; gap: .8rem; margin: 1rem 0; }
 .confirmation label { display: flex; gap: .5rem; align-items: flex-start; }
+.vision-option { display: flex; gap: .5rem; align-items: flex-start; margin: 1rem 0; }
+#llm-draft { display: block; }
 input[type=checkbox] { margin-top: .3rem; }
 pre { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.45; background: #f2f5f3; border-radius: 8px; padding: 1rem; min-height: 3rem; }
 @media (max-width: 600px) { main { padding: 1rem .5rem 2rem; } header, section { padding: 1rem; } }

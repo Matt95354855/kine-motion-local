@@ -33,7 +33,19 @@ Cet adaptateur n'a pas été exécuté sur le poste cible. Les versions des dép
 
 Les contrôles de vue de profil et de stabilité de caméra restent des confirmations manuelles après l'essai. S'ils ne sont pas confirmés, aucune valeur n'est publiée. Les règles provisoires de trois images exploitables et de couverture de 80 % servent uniquement aux tests ; elles ne sont pas des seuils cliniques validés. Une deuxième personne détectée entraîne un refus. Les captures ne sont pas conservées, hormis une image de preuve en mémoire jusqu'à l'expiration de la séance ou son remplacement.
 
-Le harness [décrit ici](docs/tool-integration.md) expose uniquement des outils de lecture liés à la séance. Sans LLM, le brouillon déterministe reste disponible. Un serveur local compatible `llama.cpp` peut être configuré avec `--llm-url http://127.0.0.1:8080 --llm-model NOM`. L'option supplémentaire `--llm-vision` autorise l'envoi d'une unique image de preuve à un modèle visuel local compatible ; elle est désactivée par défaut. La note du modèle reste distincte du brouillon et doit être revue. Aucune intégration avec un vrai modèle ou avec les outils futurs de l'utilisateur n'a encore été validée.
+Le harness [décrit ici](docs/tool-integration.md) expose uniquement des outils de lecture liés à la séance. Sans LLM, le brouillon déterministe reste disponible. L'interface permet de choisir GPT-OSS ou Qwen 3.6, puis de vérifier que le serveur local annonce effectivement le nom de modèle configuré. Elle ne télécharge ni ne démarre les poids : les serveurs d'inférence doivent déjà être lancés en local avec une API compatible `/v1/chat/completions` et `/v1/models`.
+
+Exemple de branchement, après démarrage séparé des deux serveurs et avec leurs noms de modèle réellement annoncés :
+
+```sh
+python3 -m services.api.server --demo-pose \
+  --gpt-oss-url http://127.0.0.1:8081 --gpt-oss-model gpt-oss-20b \
+  --qwen-url http://127.0.0.1:8082 --qwen-model Qwen3.6-27B
+```
+
+GPT-OSS est utilisé pour la synthèse textuelle des observations et **ne reçoit jamais d'image**. Qwen 3.6 peut recevoir une seule image de preuve si le serveur est démarré avec `--qwen-vision` **et** si l'utilisateur coche l'option dans l'interface pour la demande concernée. Un serveur Qwen servi en mode texte seul ne doit pas utiliser cette option. L'ancien branchement `--llm-url`, `--llm-model` et `--llm-vision` reste disponible sous « Modèle local personnalisé ».
+
+Les valeurs de noms ci-dessus sont des exemples d'alias de serveur ; la vérification compare exactement l'identifiant annoncé par `/v1/models`. Qwen3.6-27B est le profil initial, à adapter si une autre variante est choisie. Le choix des poids et de leur quantification doit être confirmé selon la mémoire disponible sur le poste cible ; ce dépôt ne garantit pas qu'un modèle donné tienne intégralement dans la carte graphique. La note du modèle reste distincte du brouillon et doit être revue. Aucune intégration avec un vrai modèle ou avec les outils futurs de l'utilisateur n'a encore été validée.
 
 ## Documents de départ
 

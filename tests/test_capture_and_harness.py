@@ -1,5 +1,6 @@
 import json
 import unittest
+from unittest.mock import patch
 
 from packages.contracts.models import MeasurementStatus
 from packages.harness.demo import synthetic_trial
@@ -130,6 +131,40 @@ class CaptureAndHarnessTests(unittest.TestCase):
     def test_remote_llm_address_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
             LocalLLMClient("https://example.com", "model")
+
+    def test_local_client_probes_exact_alias_and_uses_chat_tools(self) -> None:
+        requests = []
+
+        class Response:
+            def __init__(self, body):
+                self.body = body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def read(self, _limit):
+                return json.dumps(self.body).encode("utf-8")
+
+        class Opener:
+            def open(self, request, timeout):
+                requests.append(request)
+                if request.full_url.endswith("/v1/models"):
+                    return Response({"data": [{"id": "gpt-oss-20b"}]})
+                return Response({"choices": [{"message": {"content": "{}"}}]})
+
+        with patch("packages.harness.local_llm.build_opener", return_value=Opener()):
+            client = LocalLLMClient("http://127.0.0.1:8081", "gpt-oss-20b")
+            self.assertTrue(client.check_model())
+            client.complete([{"role": "user", "content": "test"}], [{"type": "function"}])
+        self.assertEqual(requests[0].get_method(), "GET")
+        self.assertEqual(requests[1].get_method(), "POST")
+        payload = json.loads(requests[1].data)
+        self.assertEqual(payload["model"], "gpt-oss-20b")
+        self.assertEqual(payload["tool_choice"], "auto")
+        self.assertNotIn("temperature", payload)
 
     def test_opt_in_visual_harness_sends_only_current_keyframe_to_local_model(self) -> None:
         measurement = assess_elbow_trial(synthetic_trial())

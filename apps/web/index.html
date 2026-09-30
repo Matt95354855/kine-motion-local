@@ -47,8 +47,16 @@
       <h2 id="result-title">Résultat et brouillon</h2>
       <p id="measurement-status" class="status">Aucun essai terminé.</p>
       <pre id="draft"></pre>
+      <label for="llm-model">Modèle local</label>
+      <select id="llm-model" disabled>
+        <option value="gpt_oss">GPT-OSS</option>
+        <option value="qwen36">Qwen 3.6</option>
+      </select>
+      <button id="check-model" disabled>Vérifier le modèle</button>
+      <p id="model-status" class="status" aria-live="polite">Chargement des modèles locaux…</p>
+      <label class="vision-option"><input id="include-image" type="checkbox" disabled> Envoyer une image de preuve au modèle sélectionné</label>
       <button id="llm-draft" disabled>Demander une note au LLM local</button>
-      <p class="hint">Si le mode visuel est activé au démarrage du serveur, cette action transmet une image de preuve au modèle local. La note obtenue reste à vérifier.</p>
+      <p class="hint">GPT-OSS reçoit seulement les mesures et observations structurées. Qwen 3.6 ne reçoit une image que si son mode visuel est activé et si vous cochez l'option ci-dessus. La note reste à vérifier.</p>
       <p id="llm-status" class="status"></p>
       <pre id="llm-note"></pre>
     </section>
