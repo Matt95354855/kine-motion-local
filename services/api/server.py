@@ -3,16 +3,19 @@
 import argparse
 import json
 import os
+from base64 import b64encode
 from dataclasses import asdict
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from socket import timeout as SocketTimeout
 from urllib.error import URLError
 from urllib.parse import urlsplit
 
 from packages.harness.local_llm import LocalLLMClient
 from packages.harness.runner import run_harness
 from packages.harness.tools import ToolContext
+from packages.biomechanics.motion import frame_angle
 from packages.pose.mediapipe_engine import MediaPipePoseEngine
 from packages.pose.synthetic_engine import SyntheticPoseEngine
 from services.api.state import MAX_JPEG_BYTES, SessionManager
@@ -52,6 +55,10 @@ def make_handler(
         bindings = {**bindings, "custom": ModelBinding("Modèle local personnalisé", llm_client, llm_vision, llm_vision)}
 
     class Handler(BaseHTTPRequestHandler):
+        def setup(self) -> None:
+            super().setup()
+            self.connection.settimeout(15)
+
         def log_message(self, _format: str, *_args) -> None:
             # Évite d'inscrire le détail des séances ou des images dans les logs.
             pass
@@ -81,7 +88,10 @@ def make_handler(
             length = int(self.headers.get("Content-Length", "0"))
             if length <= 0 or length > limit:
                 raise ValueError("Taille de requête invalide")
-            return self.rfile.read(length)
+            body = self.rfile.read(length)
+            if len(body) != length:
+                raise ValueError("Requête tronquée")
+            return body
 
         def _document(self) -> dict:
             if self.headers.get("Content-Type", "").split(";")[0] != "application/json":
@@ -109,6 +119,7 @@ def make_handler(
                 if path == "/api/status":
                     self._json(200, {
                         "pose_mode": pose_mode,
+                        "capture_limits": {"max_frames": 600, "max_jpeg_bytes": MAX_JPEG_BYTES, "sampling_interval_ms": 200},
                         "llm_configured": any(item.client is not None for item in bindings.values()),
                         "llm_vision": any(item.image_enabled for item in bindings.values()),
                         "models": [
@@ -126,6 +137,8 @@ def make_handler(
                 static = {
                     "/": ("index.html", "text/html; charset=utf-8"),
                     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
+                    "/guide.js": ("guide.js", "text/javascript; charset=utf-8"),
+                    "/capture-core.js": ("capture-core.js", "text/javascript; charset=utf-8"),
                     "/style.css": ("style.css", "text/css; charset=utf-8"),
                 }
                 if path not in static:
@@ -156,7 +169,13 @@ def make_handler(
                         int(self.headers.get("X-Sequence", "-1")),
                         int(self.headers.get("X-Timestamp-Ms", "-1")),
                     )
-                    self._json(200, {"sequence": frame.sequence, "quality_reason": frame.quality_reason})
+                    self._json(200, {"sequence": frame.sequence, "timestamp_ms": frame.timestamp_ms,
+                                     "quality_reason": frame.quality_reason,
+                                     "angle_deg": frame_angle(frame),
+                                     "pose": {"width_px": frame.width_px, "height_px": frame.height_px,
+                                              "shoulder": asdict(frame.shoulder) if frame.shoulder else None,
+                                              "elbow": asdict(frame.elbow) if frame.elbow else None,
+                                              "wrist": asdict(frame.wrist) if frame.wrist else None}})
                 elif path == "/api/session/finish":
                     doc = self._document()
                     measurement = manager.finish(
@@ -168,7 +187,13 @@ def make_handler(
                     )
                     from packages.harness.report import render_draft
 
-                    self._json(200, {"measurement": asdict(measurement), "draft": render_draft(measurement)})
+                    self._json(200, {"measurement": asdict(measurement), "draft": render_draft(measurement),
+                                     **manager.completed_details(doc.get("session_id", ""), doc.get("token", ""))})
+                elif path == "/api/session/evidence":
+                    doc = self._document()
+                    measurement, keyframe = manager.completed_snapshot(doc.get("session_id", ""), doc.get("token", ""))
+                    self._json(200, {"jpeg_base64": b64encode(keyframe).decode("ascii") if keyframe else None,
+                                     "evidence_ref": measurement.evidence_refs[0] if keyframe else None})
                 elif path == "/api/session/cancel":
                     doc = self._document()
                     manager.cancel(doc.get("session_id", ""), doc.get("token", ""))
@@ -216,6 +241,8 @@ def make_handler(
                 self._json(400, {"error": "invalid_request"})
             except (RuntimeError, FileNotFoundError):
                 self._json(503, {"error": "pose_engine_unavailable"})
+            except SocketTimeout:
+                self._json(408, {"error": "request_timeout"})
 
     return Handler
 

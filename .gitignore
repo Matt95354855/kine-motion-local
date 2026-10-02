@@ -26,6 +26,9 @@ tmp/
 *.onnx
 *.pt
 *.pth
+*.task
+models/
+.cache/
 
 # Artefacts de développement.
 __pycache__/

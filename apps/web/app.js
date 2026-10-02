@@ -2,236 +2,343 @@
 
 const $ = (id) => document.getElementById(id);
 const preview = $("preview");
-const canvas = document.createElement("canvas");
-const context = canvas.getContext("2d", { willReadFrequently: false });
-let session = null;
-let stream = null;
-let fileUrl = null;
-let timer = null;
-let pending = null;
-let sequence = 0;
-let startedAt = 0;
-let mode = null;
-let ending = false;
-let models = [];
-
-async function request(path, options = {}) {
-  const response = await fetch(path, { cache: "no-store", ...options });
-  const body = await response.json();
-  if (!response.ok) throw new Error(body.error || `Erreur HTTP ${response.status}`);
-  return body;
+const captureCanvas = document.createElement("canvas");
+const captureContext = captureCanvas.getContext("2d");
+const controllers = new Set();
+const MAX_DURATION_MS = 120000;
+let phase = "idle", epoch = 0, session = null, stream = null, source = null;
+let fileUrl = null, evidenceUrl = null, timer = null, expiryTimer = null, pending = null;
+let trialDeadlineTimer = null;
+let sequence = 0, startedAt = 0, clock = null, resultDocument = null, latestPose = null;
+let models = [], demo = false, llmBusy = false, serverReady = false;
+let limits = { max_frames: 600, sampling_interval_ms: 200 };
+const qualityLabels = {
+  no_pose: "Personne non détectée", multiple_people: "Une seule personne dans le cadre",
+  occlusion: "Gardez épaule, coude et poignet visibles", out_of_frame: "Reculez pour cadrer le bras",
+  degenerate_landmarks: "Repères du bras insuffisants",
+};
+function message(error) {
+  return ({ NotAllowedError: "Permission caméra refusée", NotFoundError: "Aucune caméra trouvée",
+    NotReadableError: "Caméra occupée ou déconnectée", OverconstrainedError: "Cette caméra n’est plus disponible",
+    AbortError: "Délai dépassé ou opération annulée" })[error.name] || error.message;
 }
-
-function jsonPost(path, document) {
-  return request(path, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(document),
-  });
+async function request(path, options = {}, timeout = 15000) {
+  const controller = new AbortController();
+  controllers.add(controller);
+  const timeoutId = setTimeout(() => controller.abort(), timeout);
+  try {
+    const response = await fetch(path, { cache: "no-store", ...options, signal: controller.signal });
+    const body = await response.json();
+    if (!response.ok) throw new Error(({ forbidden: "Séance expirée ou non autorisée",
+      invalid_request: "Capture ou paramètres invalides", pose_engine_unavailable: "Moteur de pose indisponible" })[body.error] || `Erreur ${response.status}`);
+    return body;
+  } finally { clearTimeout(timeoutId); controllers.delete(controller); }
 }
-
-function updateModelSelection() {
-  const selected = models.find((item) => item.id === $("llm-model").value);
-  const imageAvailable = Boolean(selected?.image_enabled);
-  $("include-image").disabled = !imageAvailable;
-  if (!imageAvailable) $("include-image").checked = false;
-  $("check-model").disabled = !selected?.configured;
-  $("model-status").textContent = !selected?.configured ?
-    "Modèle non configuré ; le brouillon déterministe reste disponible." :
-    `${selected.label} configuré, disponibilité non encore vérifiée.`;
+function jsonPost(path, document, timeout) {
+  return request(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(document) }, timeout);
 }
-
+function controls() {
+  const locked = !["idle", "ready", "completed"].includes(phase);
+  $("camera-start").disabled = locked || !serverReady;
+  $("video-file").disabled = locked || !serverReady;
+  $("camera-device").disabled = locked;
+  $("side").disabled = locked;
+  $("record").disabled = phase !== "ready";
+  $("finish").disabled = phase !== "recording";
+  $("stop").disabled = ["idle", "completed", "finishing"].includes(phase);
+  $("llm-draft").disabled = phase !== "completed" || llmBusy;
+}
+function setPhase(value) { phase = value; controls(); }
 function releaseMedia() {
-  if (timer) clearInterval(timer);
-  timer = null;
-  if (stream) stream.getTracks().forEach((track) => track.stop());
+  clearInterval(timer); timer = null;
+  clearTimeout(trialDeadlineTimer); trialDeadlineTimer = null;
+  preview.onended = preview.onerror = null;
+  if (stream) stream.getTracks().forEach((track) => { track.onended = null; track.stop(); });
   stream = null;
-  preview.pause();
-  preview.srcObject = null;
-  preview.removeAttribute("src");
-  preview.onended = null;
+  preview.pause(); preview.srcObject = null; preview.removeAttribute("src"); preview.load();
   if (fileUrl) URL.revokeObjectURL(fileUrl);
   fileUrl = null;
-  mode = null;
-  preview.classList.remove("mirrored");
-  $("finish").disabled = true;
-  $("stop").disabled = true;
 }
-
-function jpegBlob() {
+function clearResults() {
+  resultDocument = null; latestPose = null;
+  if (evidenceUrl) URL.revokeObjectURL(evidenceUrl);
+  evidenceUrl = null;
+  $("evidence").removeAttribute("src"); $("evidence").hidden = true;
+  $("results").hidden = true;
+  $("draft").textContent = $("llm-note").textContent = $("llm-status").textContent = "";
+  $("export-report").disabled = $("export-json").disabled = true;
+  KineGuide.drawPose($("pose-overlay"), null, false);
+}
+async function cancelSession() {
+  ++epoch;
+  const old = session;
+  session = null; source = null; llmBusy = false;
+  controllers.forEach((controller) => controller.abort());
+  pending = null;
+  clearTimeout(expiryTimer); expiryTimer = null;
+  releaseMedia(); clearResults();
+  preview.classList.remove("mirrored");
+  $("empty-state").hidden = false;
+  $("capture-badge").textContent = "Caméra inactive";
+  $("elapsed").textContent = "00:00";
+  setPhase("idle");
+  // La révocation n'appartient pas aux nouvelles opérations : une réponse tardive
+  // ne peut ni effacer ni remplacer l'essai suivant.
+  if (old) {
+    fetch("/api/session/cancel", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(old), keepalive: true }).catch(() => {});
+  }
+}
+function waitForVideo() {
+  if (preview.readyState >= 2 && preview.videoWidth) return Promise.resolve();
   return new Promise((resolve, reject) => {
-    canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error("Image non disponible")), "image/jpeg", 0.8);
+    const clean = () => { clearTimeout(id); preview.removeEventListener("loadeddata", loaded); preview.removeEventListener("error", failed); };
+    const loaded = () => { clean(); resolve(); };
+    const failed = () => { clean(); reject(new Error("Vidéo illisible : essayez un MP4 H.264 ou WebM")); };
+    const id = setTimeout(() => { clean(); reject(new Error("La vidéo ne répond pas")); }, 10000);
+    preview.addEventListener("loadeddata", loaded, { once: true });
+    preview.addEventListener("error", failed, { once: true });
   });
 }
-
-async function sampleFrame() {
-  if (!session || !mode || pending || ending || preview.readyState < 2) return;
-  const currentSession = session;
-  const scale = Math.min(1, 640 / preview.videoWidth, 1080 / preview.videoHeight);
-  const width = Math.round(preview.videoWidth * scale);
-  const height = Math.round(preview.videoHeight * scale);
-  if (!width || !height) return;
-  canvas.width = width;
-  canvas.height = height;
-  context.drawImage(preview, 0, 0, width, height); // Jamais l'affichage miroir.
-  const currentSequence = sequence++;
-  const timestamp = Math.max(0, Math.round(performance.now() - startedAt));
-  pending = (async () => {
-    const blob = await jpegBlob();
-    if (blob.type !== "image/jpeg") throw new Error("Format JPEG indisponible");
-    const result = await request("/api/frame", {
-      method: "POST",
-      headers: {
-        "Content-Type": "image/jpeg",
-        "X-Session-Id": currentSession.session_id,
-        "X-Session-Token": currentSession.token,
-        "X-Sequence": String(currentSequence),
-        "X-Timestamp-Ms": String(timestamp),
-      },
-      body: blob,
-    });
-    $("frame-status").textContent = `Image ${result.sequence + 1} traitée` +
-      (result.quality_reason ? ` · ${result.quality_reason}` : "");
-  })();
-  try { await pending; }
-  catch (error) {
-    $("frame-status").textContent = `Capture interrompue : ${error.message}`;
-    await cancelSession();
-  } finally { pending = null; }
-}
-
-async function begin(source) {
-  if (session || ending) await cancelSession();
-  $("draft").textContent = "";
-  $("llm-note").textContent = "";
-  $("llm-draft").disabled = true;
-  $("view-confirmed").checked = false;
-  $("stable-confirmed").checked = false;
+async function prepare(sourceType, file = null) {
+  await cancelSession();
+  const operation = epoch;
+  setPhase("preparing");
+  $("view-confirmed").checked = $("stable-confirmed").checked = false;
+  $("frame-status").textContent = "Aucune image analysée";
+  $("capture-details").textContent = "Préparation…";
   try {
-    if (source === "camera") {
-      if (!navigator.mediaDevices?.getUserMedia) throw new Error("Caméra indisponible sur cette origine");
-      stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },
-        audio: false,
-      });
-      preview.srcObject = stream;
+    if (sourceType === "camera") {
+      if (!navigator.mediaDevices?.getUserMedia) throw new Error("Utilisez l’adresse localhost pour la caméra");
+      const deviceId = $("camera-device").value;
+      const opened = await navigator.mediaDevices.getUserMedia({ audio: false, video: {
+        width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 },
+        ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
+      } });
+      if (operation !== epoch) { opened.getTracks().forEach((track) => track.stop()); return; }
+      stream = opened; preview.srcObject = stream;
       preview.classList.add("mirrored");
-      stream.getVideoTracks()[0].addEventListener("ended", () => cancelSession());
-      const settings = stream.getVideoTracks()[0].getSettings();
-      $("capture-details").textContent = `Webcam : ${settings.width || "?"} × ${settings.height || "?"} pixels`;
+      stream.getVideoTracks()[0].onended = () => {
+        $("capture-details").textContent = "Caméra déconnectée — essai interrompu";
+        if (phase === "recording") finishSession(true); else cancelSession();
+      };
+      await preview.play(); await waitForVideo();
+      if (operation !== epoch) return;
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      if (operation !== epoch) return;
+      $("camera-device").replaceChildren(...devices.filter((device) => device.kind === "videoinput").map((device, i) => {
+        const option = document.createElement("option"); option.value = device.deviceId;
+        option.textContent = device.label || `Caméra ${i + 1}`; return option;
+      }));
+      $("camera-device").value = stream.getVideoTracks()[0].getSettings().deviceId || "";
     } else {
-      const file = $("video-file").files[0];
-      if (!file) return;
-      fileUrl = URL.createObjectURL(file);
-      preview.src = fileUrl;
-      $("capture-details").textContent = `Vidéo locale : ${file.name}`;
+      if (!file || !file.type.startsWith("video/")) throw new Error("Choisissez un fichier vidéo");
+      if (file.size > 200 * 1024 * 1024) throw new Error("Vidéo limitée à 200 Mo");
+      fileUrl = URL.createObjectURL(file); preview.src = fileUrl; preview.load();
+      await waitForVideo();
+      if (operation !== epoch) return;
+      if (!Number.isFinite(preview.duration) || preview.duration > 120) throw new Error("Choisissez un clip de 2 minutes maximum");
+      preview.pause();
       preview.onended = () => finishSession(false);
     }
-    await preview.play();
-    session = await jsonPost("/api/session/start", { side: $("side").value });
-    mode = source;
-    sequence = 0;
-    startedAt = performance.now();
-    $("finish").disabled = false;
-    $("stop").disabled = false;
-    $("frame-status").textContent = "Analyse en cours…";
-    timer = setInterval(sampleFrame, 200);
+    if (operation !== epoch) return;
+    source = { type: sourceType, width_px: preview.videoWidth, height_px: preview.videoHeight,
+      mirrored_preview: sourceType === "camera", duration_ms: sourceType === "file" ? Math.round(preview.duration * 1000) : null };
+    $("empty-state").hidden = true;
+    $("capture-badge").textContent = sourceType === "camera" ? "Caméra prête" : "Vidéo prête";
+    $("capture-details").textContent = `${source.width_px} × ${source.height_px} · ${sourceType === "camera" ? "aperçu miroir, analyse non inversée" : "lecture à vitesse normale"}`;
+    $("live-feedback").textContent = "Vérifiez le cadrage, puis démarrez l’essai";
+    preview.onerror = () => { $("capture-details").textContent = "Lecture interrompue"; if (phase === "recording") finishSession(true); else cancelSession(); };
+    setPhase("ready");
   } catch (error) {
-    $("capture-details").textContent = `Démarrage impossible : ${error.message}`;
+    if (operation !== epoch) return;
     await cancelSession();
+    $("capture-details").textContent = message(error);
   }
 }
-
-async function finishSession(stopped) {
-  if (!session || ending) return;
-  ending = true;
-  if (timer) clearInterval(timer);
-  timer = null;
-  if (stopped && stream) stream.getTracks().forEach((track) => track.stop());
-  if (stopped) preview.pause();
+function jpegBlob() {
+  return new Promise((resolve, reject) => captureCanvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error("Image indisponible")), "image/jpeg", 0.8));
+}
+async function sampleFrame() {
+  if (phase !== "recording" || pending || preview.readyState < 2 || !session) return;
+  const operation = epoch, currentSession = session;
+  const capturedAt = performance.now();
+  if (sequence >= limits.max_frames || performance.now() - startedAt >= MAX_DURATION_MS) { finishSession(false); return; }
+  const timestamp = clock.next(preview.currentTime, performance.now());
+  if (timestamp === null) return;
+  const scale = Math.min(1, 640 / preview.videoWidth, 1080 / preview.videoHeight);
+  captureCanvas.width = Math.max(1, Math.round(preview.videoWidth * scale));
+  captureCanvas.height = Math.max(1, Math.round(preview.videoHeight * scale));
+  captureContext.drawImage(preview, 0, 0, captureCanvas.width, captureCanvas.height);
+  const currentSequence = sequence++;
+  const task = (async () => {
+    const blob = await jpegBlob();
+    if (operation !== epoch) return;
+    const response = await request("/api/frame", { method: "POST", headers: {
+      "Content-Type": "image/jpeg", "X-Session-Id": currentSession.session_id,
+      "X-Session-Token": currentSession.token, "X-Sequence": String(currentSequence), "X-Timestamp-Ms": String(timestamp),
+    }, body: blob });
+    if (operation !== epoch || phase !== "recording") return;
+    const latencyMs = Math.round(performance.now() - capturedAt);
+    const delayed = latencyMs > 1000;
+    latestPose = response.quality_reason || delayed ? null : response.pose;
+    KineGuide.drawPose($("pose-overlay"), latestPose, source.mirrored_preview);
+    const feedback = response.quality_reason ? qualityLabels[response.quality_reason] || "Capture à vérifier" :
+      response.angle_deg === null ? "Bras non exploitable" : `${Math.round(response.angle_deg)}° · angle apparent`;
+    $("live-feedback").textContent = (demo ? "Simulation · " : "") +
+      (delayed ? "Analyse retardée — repères masqués" : feedback);
+    $("frame-status").textContent = `${response.sequence + 1} images traitées`;
+    $("frame-status").title = `Aller-retour traitement : ${latencyMs} ms`;
+    const seconds = Math.floor(timestamp / 1000);
+    $("elapsed").textContent = `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
+  })();
+  pending = task;
+  try { await task; }
+  catch (error) {
+    if (operation === epoch) { await cancelSession(); $("capture-details").textContent = `Essai interrompu : ${message(error)}`; }
+  } finally { if (pending === task) pending = null; }
+}
+async function startTrial() {
+  if (phase !== "ready") return;
+  const operation = epoch;
+  setPhase("starting");
   try {
-    if (pending) await pending;
-    if (!session) return;
-    const result = await jsonPost("/api/session/finish", {
-      ...session,
-      view_confirmed: $("view-confirmed").checked,
-      camera_stable_confirmed: $("stable-confirmed").checked,
-      stopped,
-    });
-    $("measurement-status").textContent = `Statut : ${result.measurement.status}`;
-    $("draft").textContent = result.draft;
-    $("llm-draft").disabled = false;
-    $("frame-status").textContent = "Essai terminé.";
+    const created = await jsonPost("/api/session/start", { side: $("side").value });
+    if (operation !== epoch) {
+      fetch("/api/session/cancel", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(created), keepalive: true }); return;
+    }
+    session = created; sequence = 0; startedAt = performance.now();
+    clock = new KineCapture.CaptureClock(source.type, startedAt);
+    expiryTimer = setTimeout(() => { cancelSession(); $("capture-details").textContent = "Séance expirée : données effacées"; }, 15 * 60 * 1000);
+    setPhase("recording");
+    trialDeadlineTimer = setTimeout(() => finishSession(false), MAX_DURATION_MS);
+    $("capture-badge").textContent = demo ? "Essai simulé" : "Analyse en cours";
+    await sampleFrame();
+    if (operation !== epoch || phase !== "recording") return;
+    await preview.play();
+    timer = setInterval(sampleFrame, limits.sampling_interval_ms);
   } catch (error) {
-    $("frame-status").textContent = `Fin d'essai impossible : ${error.message}`;
-    await cancelSession();
-  } finally {
-    releaseMedia();
-    ending = false;
+    if (operation === epoch) { await cancelSession(); $("capture-details").textContent = message(error); }
   }
 }
-
-async function cancelSession() {
-  const old = session;
-  session = null;
+async function finishSession(stopped) {
+  if (phase !== "recording" || !session) return;
+  const operation = epoch, currentSession = session;
+  const waiting = pending;
+  setPhase("finishing");
+  // L'arrêt des pistes ne dépend pas du temps de réponse de l'analyse.
   releaseMedia();
-  if (old) {
-    try { await jsonPost("/api/session/cancel", old); } catch (_) { /* séance locale expirée */ }
+  $("capture-badge").textContent = stopped ? "Essai interrompu" : "Calcul du résultat";
+  try {
+    if (waiting) await waiting;
+    if (operation !== epoch) return;
+    const response = await jsonPost("/api/session/finish", { ...currentSession,
+      view_confirmed: $("view-confirmed").checked, camera_stable_confirmed: $("stable-confirmed").checked, stopped });
+    if (operation !== epoch) return;
+    resultDocument = { schema_version: "1.0", capture_version: "0.2.0-dev", mode: demo ? "synthetic_demo" : "mediapipe_experimental", source,
+      measurement: response.measurement, motion: response.motion, evidence_sequence: response.evidence_sequence,
+      evidence_timestamp_ms: response.evidence_timestamp_ms, professional_validation: false };
+    const measurement = response.measurement, motion = response.motion;
+    $("results").hidden = false;
+    $("angle-result").textContent = measurement.value_deg === null ? "—" : `${measurement.value_deg.toFixed(1)}°${demo ? " · simulé" : ""}`;
+    $("duration-result").textContent = `${(motion.duration_ms / 1000).toFixed(1)} s`;
+    $("coverage-result").textContent = `${measurement.valid_frame_count} / ${measurement.total_frame_count}`;
+    $("measurement-status").textContent = demo ? "Simulation — non clinique" :
+      ({ valid: "Expérimental — à vérifier", limited: "Capture limitée", rejected: "Essai non exploitable", not_performed: "Non réalisé" })[measurement.status];
+    $("draft").textContent = (demo ? "SIMULATION : les pixels ne sont pas analysés.\n\n" : "") + response.draft;
+    $("evidence-label").textContent = response.evidence_timestamp_ms === null ? "Aucune image probante" :
+      `Image du pic · ${(response.evidence_timestamp_ms / 1000).toFixed(1)} s`;
+    KineGuide.drawPose($("pose-overlay"), null, false);
+    KineGuide.drawChart($("angle-chart"), motion.samples);
+    $("export-report").disabled = $("export-json").disabled = false;
+    $("capture-badge").textContent = "Essai terminé";
+    $("live-feedback").textContent = measurement.value_deg === null ?
+      "Mesure non disponible — consultez les limites" : "Résultat expérimental, à vérifier";
+    $("frame-status").textContent = `${motion.processing_rate_hz} images/s · ${motion.processed_frames} traitées`;
+    $("capture-details").textContent = "Caméra arrêtée · une seule image de preuve en mémoire, effacée au nouvel essai";
+    setPhase("completed");
+    const evidence = await jsonPost("/api/session/evidence", currentSession);
+    if (operation !== epoch) return;
+    if (evidence.jpeg_base64) {
+      const bytes = Uint8Array.from(atob(evidence.jpeg_base64), (char) => char.charCodeAt(0));
+      evidenceUrl = URL.createObjectURL(new Blob([bytes], { type: "image/jpeg" }));
+      $("evidence").src = evidenceUrl; $("evidence").hidden = false;
+      $("evidence").classList.toggle("mirrored", source.mirrored_preview);
+    } else { $("empty-state").hidden = false; }
+  } catch (error) {
+    if (operation !== epoch) return;
+    if (phase === "completed") $("capture-details").textContent = `Résultat conservé · image indisponible : ${message(error)}`;
+    else { await cancelSession(); $("capture-details").textContent = `Fin d’essai impossible : ${message(error)}`; }
   }
 }
-
-$("camera-start").addEventListener("click", () => begin("camera"));
-$("video-file").addEventListener("change", () => begin("file"));
+function download(contents, mime, extension) {
+  const url = URL.createObjectURL(new Blob([contents], { type: mime }));
+  const link = document.createElement("a"); link.href = url;
+  link.download = `kine-brouillon-${new Date().toISOString().slice(0, 10)}.${extension}`;
+  link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+function updateModelSelection() {
+  const selected = models.find((item) => item.id === $("llm-model").value);
+  $("include-image").disabled = !selected?.image_enabled;
+  if (!selected?.image_enabled) $("include-image").checked = false;
+  $("check-model").disabled = !selected?.configured;
+  $("model-status").textContent = selected?.configured ? "Serveur configuré, non encore vérifié" : "Sans serveur : brouillon déterministe disponible";
+}
+$("camera-start").addEventListener("click", () => prepare("camera"));
+$("video-file").addEventListener("change", () => { const file = $("video-file").files[0]; $("video-file").value = ""; if (file) prepare("file", file); });
+$("camera-device").addEventListener("change", () => { if (source?.type === "camera") prepare("camera"); });
+$("record").addEventListener("click", startTrial);
 $("finish").addEventListener("click", () => finishSession(false));
-$("stop").addEventListener("click", () => finishSession(true));
+$("stop").addEventListener("click", () => { if (phase === "recording") finishSession(true); else cancelSession(); });
+$("restart").addEventListener("click", () => { cancelSession(); $("capture-details").textContent = "Prêt pour un nouvel essai"; $("frame-status").textContent = "Aucune image analysée"; });
+$("side").addEventListener("change", () => KineGuide.setSide($("side").value));
+$("guide-toggle").addEventListener("click", KineGuide.toggle);
+$("export-report").addEventListener("click", () => { if (resultDocument) download($("draft").textContent, "text/plain;charset=utf-8", "txt"); });
+$("export-json").addEventListener("click", () => { if (resultDocument) download(JSON.stringify(resultDocument, null, 2), "application/json", "json"); });
 $("llm-model").addEventListener("change", updateModelSelection);
 $("check-model").addEventListener("click", async () => {
   const selected = $("llm-model").value;
-  $("model-status").textContent = "Vérification du serveur local…";
+  $("model-status").textContent = "Vérification…";
   try {
-    const result = await jsonPost("/api/models/check", { model_id: selected });
-    const labels = {
-      ready: "Modèle détecté sur le serveur local.",
-      model_not_advertised: "Serveur joignable, mais ce nom de modèle n'est pas annoncé.",
-      runtime_unreachable: "Serveur du modèle inaccessible ou réponse invalide.",
-      not_configured: "Modèle non configuré.",
-    };
-    if ($("llm-model").value === selected) $("model-status").textContent = labels[result.state] || result.state;
-  } catch (error) { $("model-status").textContent = `Vérification impossible : ${error.message}`; }
+    const response = await jsonPost("/api/models/check", { model_id: selected });
+    const labels = { ready: "Modèle annoncé par le serveur local", model_not_advertised: "Alias absent du serveur",
+      runtime_unreachable: "Serveur inaccessible", not_configured: "Serveur non configuré" };
+    if ($("llm-model").value === selected) $("model-status").textContent = labels[response.state] || response.state;
+  } catch (error) { $("model-status").textContent = message(error); }
 });
 $("llm-draft").addEventListener("click", async () => {
-  if (!session) return;
-  $("llm-status").textContent = "Consultation du harness local…";
+  if (phase !== "completed" || llmBusy || !session) return;
+  const operation = epoch, currentSession = session;
+  llmBusy = true; controls(); $("llm-status").textContent = "Préparation de la note…";
   try {
-    const result = await jsonPost("/api/harness/draft", {
-      ...session,
-      model_id: $("llm-model").value,
-      include_image: $("include-image").checked,
-    });
-    $("llm-note").textContent = result.proposed_note || "Aucune note du modèle ; brouillon déterministe conservé.";
-    $("llm-status").textContent = result.fallback_reason ?
-      `Repli utilisé : ${result.fallback_reason}` :
-      `Note proposée pour revue professionnelle${result.image_sent ? " · une image transmise localement" : " · aucune image transmise"}.`;
-  } catch (error) { $("llm-status").textContent = `Harness indisponible : ${error.message}`; }
+    const response = await jsonPost("/api/harness/draft", { ...currentSession,
+      model_id: $("llm-model").value, include_image: $("include-image").checked }, 120000);
+    if (operation !== epoch) return;
+    $("llm-note").textContent = response.proposed_note || "Brouillon déterministe conservé";
+    $("llm-status").textContent = response.fallback_reason ? `Repli : ${response.fallback_reason}` :
+      `Note à revoir${response.image_sent ? " · une image transmise localement" : " · aucune image transmise"}`;
+  } catch (error) { if (operation === epoch) $("llm-status").textContent = message(error); }
+  finally { if (operation === epoch) { llmBusy = false; controls(); } }
 });
+new ResizeObserver(() => {
+  KineGuide.drawPose($("pose-overlay"), phase === "recording" ? latestPose : null, Boolean(source?.mirrored_preview));
+  if (resultDocument) KineGuide.drawChart($("angle-chart"), resultDocument.motion.samples);
+}).observe($("camera-stage"));
+document.addEventListener("visibilitychange", () => { if (document.hidden && phase === "recording") finishSession(true); });
 window.addEventListener("pagehide", () => {
-  if (session) {
-    const body = new Blob([JSON.stringify(session)], { type: "application/json" });
-    navigator.sendBeacon("/api/session/cancel", body);
-  }
+  if (session) navigator.sendBeacon("/api/session/cancel", new Blob([JSON.stringify(session)], { type: "application/json" }));
   releaseMedia();
 });
+controls();
 request("/api/status").then((status) => {
-  models = status.models || [];
+  models = status.models || []; demo = status.pose_mode === "synthetic_demo";
+  limits = { ...limits, ...status.capture_limits };
   $("llm-model").replaceChildren(...models.map((item) => {
-    const option = document.createElement("option");
-    option.value = item.id;
-    option.textContent = item.label;
-    return option;
+    const option = document.createElement("option"); option.value = item.id; option.textContent = item.label; return option;
   }));
-  $("llm-model").disabled = models.length === 0;
-  const firstConfigured = models.find((item) => item.configured);
-  if (firstConfigured) $("llm-model").value = firstConfigured.id;
+  $("llm-model").disabled = !models.length;
+  const first = models.find((item) => item.configured); if (first) $("llm-model").value = first.id;
   updateModelSelection();
-  $("engine-status").textContent = `Pose : ${status.pose_mode} · LLM local : ${status.llm_configured ? "configuré, non vérifié" : "absent (repli disponible)"}`;
-}).catch(() => { $("engine-status").textContent = "Serveur local indisponible."; });
+  $("engine-status").textContent = demo ? "Démo · pose simulée" : "Pose réelle · expérimental";
+  serverReady = true; controls();
+}).catch(() => { $("engine-status").textContent = "Serveur indisponible"; });

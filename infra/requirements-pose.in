@@ -1,0 +1,6 @@
+# CPU perception. Le calcul LLM reste dans le serveur déjà configuré.
+mediapipe==0.10.21
+numpy==1.26.4
+opencv-contrib-python==4.11.0.86
+jax==0.4.38
+jaxlib==0.4.38

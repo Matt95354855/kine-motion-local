@@ -1,0 +1,26 @@
+name: Prototype local
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  tests:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11.14'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '25.2.0'
+      - name: Publication sans captures ni secrets usuels
+        run: python -m scripts.check_repository
+      - name: Calculs, API et séances synthétiques
+        run: python -m unittest discover -s tests -v
+      - name: Capture et contrôleur navigateur simulé
+        run: node --test tests/test_capture_core.cjs tests/test_web_lifecycle.cjs

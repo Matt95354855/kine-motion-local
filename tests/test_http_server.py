@@ -64,10 +64,19 @@ class LocalHttpTests(unittest.TestCase):
             {**session, "view_confirmed": True, "camera_stable_confirmed": True},
         )
         self.assertEqual(finished["measurement"]["status"], "valid")
+        self.assertEqual(finished["motion"]["duration_ms"], 400)
+        evidence = self.post_json("/api/session/evidence", session)
+        self.assertIsNotNone(evidence["jpeg_base64"])
+        self.assertEqual(evidence["evidence_ref"], finished["measurement"]["evidence_refs"][0])
         self.assertIn("BROUILLON NON VALIDÉ", finished["draft"])
         llm = self.post_json("/api/harness/draft", session)
         self.assertEqual(llm["fallback_reason"], "llm_unavailable")
         self.assertIsNone(llm["proposed_note"])
+        self.post_json("/api/session/cancel", session)
+        with self.assertRaises(HTTPError) as captured:
+            self.post_json("/api/session/evidence", session)
+        self.assertEqual(captured.exception.code, 403)
+        captured.exception.close()
 
     def test_foreign_origin_is_blocked_before_session_creation(self) -> None:
         request = Request(

@@ -1,59 +1,110 @@
-# kine-motion-local
+# Kiné Motion Local
 
-Prototype d'assistant local de bilan fonctionnel pour kinésithérapeute. Le projet vise à décrire certains mouvements filmés selon des protocoles définis, à préparer un brouillon de compte rendu et à présenter les preuves nécessaires à sa revue par le professionnel.
+Application web locale de capture et d'analyse **expérimentale** de la flexion du coude. Les résultats sont des angles apparents 2D, pas des mesures cliniques validées. Aucun diagnostic ni programme thérapeutique automatique.
 
-Le dépôt possède un parcours expérimental local : webcam ou vidéo choisie dans le navigateur, échantillonnage d'images, moteur de pose interchangeable, calcul d'angle apparent, contrôle de qualité, brouillon déterministe et harness pour LLM local. Aucune précision clinique n'est établie. Il n'y a pas encore de dossier patient, de stockage, de revue clinique complète ni de programme d'exercices.
+## Ce qui a été développé
 
-## Exécuter le prototype actuel
+- Interface épurée : caméra au centre, contrôles courts, compte rendu et assistant repliés.
+- Personnage animé directement sur le retour caméra pour illustrer le geste. Choix gauche/droite, guide masquable, respect de la préférence « réduire les animations ».
+- Ouverture de l'aperçu puis démarrage explicite de l'essai. Sélection de caméra, arrêt immédiat, permission refusée/déconnexion/vidéo illisible gérées.
+- Webcam sans audio ou clip local ; images non inversées pour l'analyse, aperçu caméra miroir uniquement.
+- Repères épaule/coude/poignet et angle apparent en direct. Cadrage, occlusion, absence de pose et plusieurs personnes entraînent un retour explicite.
+- Horodatage des clips à partir du temps **de la vidéo**, sans inventer de temps pour les images répétées. Une seule requête image à la fois ; caméra bloquée ou vidéo immobile : aucun nouvel échantillon.
+- Retour retardé de plus d'une seconde : repères masqués, indication de retard. Arrêt à deux minutes indépendant d'une requête bloquée.
+- Courbe temporelle brute, durée observée, couverture des images et aperçu de l'image du pic. Les lacunes ne sont pas interpolées.
+- Export explicite du brouillon `.txt` et des données de test `.json`, sans jeton de séance ni pixels. Les exports restent **non validés**.
+- Séance éphémère : toutes les images non retenues sont libérées ; au plus une image de preuve en mémoire serveur. Effacement au nouvel essai, à l'annulation ou après 15 minutes, même sans nouvelle requête.
+- Dépendances de pose verrouillées avec hashes, modèle vérifié par SHA-256, diagnostic RAM/GPU/disque, lanceur multiplateforme, tests et contrôle avant publication.
 
-Depuis la racine du dépôt, avec Python 3.11 ou plus récent :
+**LLM inchangés : GPT‑OSS et Qwen 3.6 en FP4 restent ton choix.** Aucun poids LLM n'a été installé, remplacé ou reconfiguré. Le harness, ses outils, ses requêtes et les options des serveurs existants n'ont pas été modifiés. La pose utilise le délégué CPU ; cela ne garantit pas l'absence de ressources graphiques auxiliaires selon la plateforme. Aucune compatibilité, occupation VRAM ou vitesse des deux LLM n'est certifiée ici.
 
-```sh
-python3 -m packages.harness.demo
-python3 -m unittest discover -s tests -v
-```
+## Essayer immédiatement l'interface
 
-La démo construit trois images de pose fictives, calcule un angle apparent de flexion du coude, rattache la valeur à son image d'origine et imprime un compte rendu marqué « brouillon non validé ». Le code utilise uniquement la bibliothèque standard de Python ; aucun téléchargement ou service externe n'est nécessaire à cette démo.
-
-Pour vérifier le parcours navigateur et API sans modèle de pose, lancer :
-
-```sh
-python3 -m services.api.server --demo-pose
-```
-
-Ouvrir ensuite `http://127.0.0.1:8765`. Le mode `--demo-pose` **ignore les pixels** et fabrique une pose : il vérifie le transport et l'interface, pas l'analyse de la vidéo. Le navigateur demande seulement la caméra vidéo, avec `audio: false`, ou lit un fichier vidéo local. Il envoie des JPEG échantillonnés au serveur lié à `127.0.0.1` ; le serveur ne les enregistre pas sur disque. La prévisualisation webcam est en miroir, mais les images analysées ne le sont pas.
-
-Un adaptateur [MediaPipe Pose Landmarker](https://developers.google.com/edge/mediapipe/solutions/vision/pose_landmarker/python) peut analyser les pixels si les dépendances compatibles et un modèle `.task` sont déjà installés localement :
+Après récupération de la branche `camera-guidance-local`, depuis la racine du dépôt :
 
 ```sh
-python3 -m services.api.server --pose-model /chemin/vers/pose_landmarker.task --experimental-pose
+python -m scripts.start_local --demo
 ```
 
-Cet adaptateur n'a pas été exécuté sur le poste cible. Les versions des dépendances, les licences du modèle, la précision et le trafic réseau doivent être vérifiés avant toute capture réelle. La [documentation du paquet MediaPipe](https://pypi.org/project/mediapipe/) indique l'envoi de métriques d'utilisation à Google : le mode réel n'est donc pas déclaré conforme à l'objectif « aucun trafic externe » tant que ce point n'est pas résolu et testé. Aucun modèle n'est téléchargé automatiquement.
+Sur macOS/Linux, utiliser `python3` si `python` n'existe pas ; sur Windows, `py -3.11` est également possible. Ouvrir [l'application locale](http://127.0.0.1:8765), **pas** le fichier HTML directement.
 
-Les contrôles de vue de profil et de stabilité de caméra restent des confirmations manuelles après l'essai. S'ils ne sont pas confirmés, aucune valeur n'est publiée. Les règles provisoires de trois images exploitables et de couverture de 80 % servent uniquement aux tests ; elles ne sont pas des seuils cliniques validés. Une deuxième personne détectée entraîne un refus. Les captures ne sont pas conservées, hormis une image de preuve en mémoire jusqu'à l'expiration de la séance ou son remplacement.
+Ce mode utilise seulement Python (3.11 conseillé), sans installation de pose. **La démo ignore les pixels et fabrique des repères.** Elle teste le parcours caméra/vidéo, pas la précision des mouvements. Les résultats sont marqués « simulé » dans l'écran et l'export.
 
-Le harness [décrit ici](docs/tool-integration.md) expose uniquement des outils de lecture liés à la séance. Sans LLM, le brouillon déterministe reste disponible. L'interface permet de choisir GPT-OSS ou Qwen 3.6, puis de vérifier que le serveur local annonce effectivement le nom de modèle configuré. Elle ne télécharge ni ne démarre les poids : les serveurs d'inférence doivent déjà être lancés en local avec une API compatible `/v1/chat/completions` et `/v1/models`.
+1. Choisir le côté anatomique, ouvrir la caméra ou importer un clip.
+2. Vérifier la vue de profil et la caméra stable. Ces confirmations restent humaines.
+3. Démarrer l'essai ; le guide illustre la flexion/extension, sans dosage prescrit.
+4. Terminer pour voir le résultat ; « Arrêter » interrompt et rejette la mesure.
+5. Consulter les limites puis exporter un brouillon si nécessaire.
 
-Exemple de branchement, après démarrage séparé des deux serveurs et avec leurs noms de modèle réellement annoncés :
+Limites techniques : clip ≤ 200 Mo / 2 minutes, essai ≤ 2 minutes / 600 images, cadence cible 5 images/s, JPEG ≤ 1 Mo. Utiliser un MP4 H.264 ou un WebM pris en charge par le navigateur. L'analyse n'est pas une acquisition exhaustive image par image : si le traitement ralentit, des images intermédiaires sont sautées. Le passage de l'onglet en arrière-plan interrompt l'essai par sécurité.
+
+## Installer la pose réelle sur ta machine GPU
+
+Effectuer l'installation **avant** une séance, avec Internet. Le profil testé utilise Python **3.11.14**, MediaPipe **0.10.21**, NumPy **1.26.4** et OpenCV **4.11.0.86**. Le verrou transitif complet est dans `infra/requirements-pose.lock`. L'interface ne requiert ni Node ni compilation ; Node 25.2.0 est utilisé pour ses tests uniquement.
+
+### Windows — PowerShell
+
+```powershell
+git clone --branch camera-guidance-local https://github.com/Matt95354855/kine-motion-local.git
+cd kine-motion-local
+py -3.11 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --require-hashes -r infra/requirements-pose.lock
+.\.venv\Scripts\python.exe -m scripts.prepare_pose --download
+.\.venv\Scripts\python.exe -m scripts.check_install --pose-smoke
+.\.venv\Scripts\python.exe -m scripts.start_local --experimental-pose
+```
+
+### Linux / macOS
 
 ```sh
-python3 -m services.api.server --demo-pose \
-  --gpt-oss-url http://127.0.0.1:8081 --gpt-oss-model gpt-oss-20b \
-  --qwen-url http://127.0.0.1:8082 --qwen-model Qwen3.6-27B
+git clone --branch camera-guidance-local https://github.com/Matt95354855/kine-motion-local.git
+cd kine-motion-local
+python3.11 -m venv .venv
+.venv/bin/python -m pip install --require-hashes -r infra/requirements-pose.lock
+.venv/bin/python -m scripts.prepare_pose --download
+.venv/bin/python -m scripts.check_install --pose-smoke
+.venv/bin/python -m scripts.start_local --experimental-pose
 ```
 
-GPT-OSS est utilisé pour la synthèse textuelle des observations et **ne reçoit jamais d'image**. Qwen 3.6 peut recevoir une seule image de preuve si le serveur est démarré avec `--qwen-vision` **et** si l'utilisateur coche l'option dans l'interface pour la demande concernée. Un serveur Qwen servi en mode texte seul ne doit pas utiliser cette option. L'ancien branchement `--llm-url`, `--llm-model` et `--llm-vision` reste disponible sous « Modèle local personnalisé ».
+Si le dépôt est déjà cloné, récupérer puis sélectionner cette branche en préservant les modifications locales. Les poids de pose sont téléchargés uniquement par la commande explicite `--download` ; ni le lanceur ni une séance ne téléchargent de modèle. Un fichier dont le hash diffère n'est pas remplacé silencieusement.
 
-Les valeurs de noms ci-dessus sont des exemples d'alias de serveur ; la vérification compare exactement l'identifiant annoncé par `/v1/models`. Qwen3.6-27B est le profil initial, à adapter si une autre variante est choisie. Le choix des poids et de leur quantification doit être confirmé selon la mémoire disponible sur le poste cible ; ce dépôt ne garantit pas qu'un modèle donné tienne intégralement dans la carte graphique. La note du modèle reste distincte du brouillon et doit être revue. Aucune intégration avec un vrai modèle ou avec les outils futurs de l'utilisateur n'a encore été validée.
+La RTX n'est pas nécessaire à la pose dans ce profil. Le diagnostic relève les informations NVIDIA si `nvidia-smi` est disponible, mais ne lance ni test CUDA ni LLM. **Windows/Linux et la RTX A4500 restent à vérifier sur ton matériel.** Ne pas confondre installation réussie et précision clinique.
 
-## Documents de départ
+MediaPipe reste derrière le drapeau `--experimental-pose` : dépendances natives, licences et trafic sortant doivent être examinés sur le poste cible. L'objectif « aucune sortie réseau pendant la séance » n'est pas encore certifié. Tester avec des scènes fictives puis des mouvements volontaires non cliniques ; ne pas utiliser de données de patients pour ce premier essai.
 
-- [Destination et limites d'usage](docs/intended-use.md)
-- [Périmètre du premier prototype](docs/scope-v1.md)
-- [Exigences vérifiables](docs/requirements.md)
-- [Matrice d'acceptation](docs/acceptance-matrix.md)
-- [Matrice de mesurabilité](protocols/measurement-capabilities.yaml)
-- [Registre initial des risques](docs/risk-register.md)
+## Garder tes serveurs LLM existants
 
-Les mesures devront être liées à leur capture, protocole, convention de calcul et version logicielle. Une capture insuffisante conduit à une limitation ou à une absence de mesure explicite. Le kinésithérapeute pourra corriger et refuser les sorties proposées, puis valider explicitement un rapport. Les données réelles de patients, captures, secrets et poids de modèles resteront hors du dépôt GitHub.
+Le lanceur conserve les variables et options actuelles : `KINE_GPT_OSS_URL`, `KINE_GPT_OSS_MODEL`, `KINE_QWEN36_URL`, `KINE_QWEN36_MODEL`, ou les options `--gpt-oss-url`, `--gpt-oss-model`, `--qwen-url`, `--qwen-model`. Il ne change ni leur quantification FP4 ni leur configuration d'inférence.
+
+Les serveurs déjà démarrés doivent écouter sur la boucle locale avec les endpoints existants `/v1/models` et `/v1/chat/completions`. Les alias doivent correspondre exactement à ceux annoncés par les serveurs. GPT‑OSS reste textuel. L'envoi d'une image à Qwen demeure un double consentement explicite : option existante `--qwen-vision` et case « Joindre l'image » pour la demande concernée. Aucun envoi automatique.
+
+Sans serveur LLM, la capture, les calculs, la courbe et le brouillon déterministe fonctionnent. La note proposée par le LLM reste séparée des mesures. Voir [le harness existant](docs/tool-integration.md).
+
+## Vérifications et diagnostic
+
+```sh
+python -m unittest discover -s tests -v
+node --test tests/test_capture_core.cjs tests/test_web_lifecycle.cjs
+python -m scripts.check_repository
+```
+
+Dans l'environnement de pose installé :
+
+```sh
+python -m scripts.check_install --pose-smoke
+python -m scripts.benchmark_pose --frames 30
+```
+
+Le microbenchmark utilise **des images vides** : ses chiffres ne représentent ni le suivi d'une personne ni les performances GPU/LLM. Le diagnostic affiche uniquement des informations techniques locales ; aucune photo, aucune identité, aucun secret.
+
+Au 2 octobre 2026 : **26 tests Python et 11 tests JavaScript réussis** sur le Mac Intel de développement ; interface inspectée dans le navigateur intégré ; modèle réel initialisé et absence de pose vérifiée sur image noire. La CI synthétique Linux/Windows est ajoutée, sans poids ni GPU ; son résultat distant est à consulter après publication. Les tests physiques webcam, les mouvements réels, le mode hors réseau et la RTX ne constituent pas des validations acquises.
+
+## Suite du projet
+
+- [Travail réalisé et preuves](docs/progress-2026-10-02.md)
+- [Points restants avant et après les tests](docs/remaining-work.md)
+- [Guide de test sur la machine GPU](docs/gpu-test-checklist.md)
+- [Destination du logiciel](docs/intended-use.md), [périmètre](docs/scope-v1.md), [exigences](docs/requirements.md)
+- [Matrice d'acceptation](docs/acceptance-matrix.md), [capacités mesurables](protocols/measurement-capabilities.yaml), [risques](docs/risk-register.md)
+
+Pas encore de dossier patient, base de séances, correction manuelle des repères, validation professionnelle signée, comptage fiable des répétitions, catalogue d'exercices approuvé ou capture smartphone sécurisée. Ne pas publier de captures personnelles, de poids, de certificats ou de dossiers réels sur GitHub. Le choix d'une licence du projet et la revue des licences tierces restent ouverts.

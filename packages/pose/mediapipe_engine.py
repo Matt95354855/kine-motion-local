@@ -5,9 +5,12 @@ cible avant tout usage avec des données réelles. Aucun modèle n'est télécha
 """
 
 from pathlib import Path
+from math import isfinite
+import os
 
 from packages.contracts.models import Point2D
 from packages.pose.adapter import PoseObservation
+from packages.pose.jpeg import bounded_jpeg_dimensions
 
 
 class MediaPipePoseEngine:
@@ -15,6 +18,9 @@ class MediaPipePoseEngine:
         path = Path(model_path)
         if not path.is_file():
             raise FileNotFoundError("Modèle de pose local introuvable")
+        cache = Path(__file__).resolve().parents[2] / ".cache" / "matplotlib"
+        cache.mkdir(parents=True, exist_ok=True)
+        os.environ.setdefault("MPLCONFIGDIR", str(cache))
         try:
             import cv2
             import mediapipe as mp
@@ -26,7 +32,7 @@ class MediaPipePoseEngine:
         self._mp = mp
         self._np = np
         options = mp.tasks.vision.PoseLandmarkerOptions(
-            base_options=mp.tasks.BaseOptions(model_asset_path=str(path)),
+            base_options=mp.tasks.BaseOptions(model_asset_path=str(path), delegate=mp.tasks.BaseOptions.Delegate.CPU),
             running_mode=mp.tasks.vision.RunningMode.VIDEO,
             num_poses=2,
             output_segmentation_masks=False,
@@ -36,11 +42,14 @@ class MediaPipePoseEngine:
     def detect(self, jpeg_bytes: bytes, timestamp_ms: int, side: str) -> PoseObservation:
         if side not in ("left", "right"):
             raise ValueError("Côté anatomique invalide")
+        expected_width, expected_height = bounded_jpeg_dimensions(jpeg_bytes)
         encoded = self._np.frombuffer(jpeg_bytes, dtype=self._np.uint8)
         bgr = self._cv2.imdecode(encoded, self._cv2.IMREAD_COLOR)
         if bgr is None:
             raise ValueError("Image JPEG illisible")
         height, width = bgr.shape[:2]
+        if (width, height) != (expected_width, expected_height):
+            raise ValueError("Dimensions JPEG incohérentes")
         rgb = self._cv2.cvtColor(bgr, self._cv2.COLOR_BGR2RGB)
         image = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=rgb)
         result = self._landmarker.detect_for_video(image, timestamp_ms)
@@ -58,6 +67,11 @@ class MediaPipePoseEngine:
             return Point2D(float(landmark.x), float(landmark.y))
 
         shoulder, elbow, wrist = (point(index) for index in indices)
+        if any(p is None for p in (shoulder, elbow, wrist)):
+            return PoseObservation(width, height, None, None, None, "occlusion")
+        if any(not isfinite(p.x) or not isfinite(p.y) or not 0 <= p.x <= 1 or not 0 <= p.y <= 1
+               for p in (shoulder, elbow, wrist)):
+            return PoseObservation(width, height, None, None, None, "out_of_frame")
         return PoseObservation(width, height, shoulder, elbow, wrist)
 
     def close(self) -> None:

@@ -2,13 +2,14 @@
 
 from dataclasses import dataclass, field, replace
 from secrets import token_urlsafe
-from threading import RLock
+from threading import Event, RLock, Thread
 from time import monotonic
 from typing import Callable
 from uuid import uuid4
 
 from packages.biomechanics.elbow import assess_elbow_trial
 from packages.biomechanics.geometry import apparent_elbow_flexion_deg
+from packages.biomechanics.motion import summarize_motion
 from packages.contracts.models import ElbowTrial, Measurement, PoseFrame
 from packages.pose.adapter import PoseEngine
 
@@ -30,13 +31,27 @@ class CaptureSession:
     keyframe_jpeg: bytes | None = None
     keyframe_sequence: int | None = None
     keyframe_angle: float = -1.0
+    keyframe_timestamp_ms: int | None = None
+    motion_summary: dict | None = None
 
 
 class SessionManager:
-    def __init__(self, engine_factory: Callable[[], PoseEngine]) -> None:
+    def __init__(self, engine_factory: Callable[[], PoseEngine], ttl_seconds: float = SESSION_TTL_SECONDS) -> None:
+        if ttl_seconds <= 0:
+            raise ValueError("Expiration positive requise")
         self._engine_factory = engine_factory
+        self._ttl_seconds = ttl_seconds
         self._lock = RLock()
         self._session: CaptureSession | None = None
+        self._shutdown = Event()
+        self._reaper = Thread(target=self._expire_idle, daemon=True)
+        self._reaper.start()
+
+    def _expire_idle(self) -> None:
+        while not self._shutdown.wait(min(1.0, self._ttl_seconds)):
+            with self._lock:
+                if self._session and monotonic() > self._session.expires_at:
+                    self._close_previous()
 
     def start(self, side: str) -> CaptureSession:
         if side not in ("left", "right"):
@@ -48,15 +63,26 @@ class SessionManager:
                 token=token_urlsafe(32),
                 side=side,
                 engine=self._engine_factory(),
+                expires_at=monotonic() + self._ttl_seconds,
             )
             self._session = session
             return session
 
     def _close_previous(self) -> None:
         if self._session is not None:
-            if self._session.active:
-                self._session.engine.close()
+            previous = self._session
             self._session = None
+            try:
+                if previous.active:
+                    previous.engine.close()
+            finally:
+                previous.active = False
+                previous.frames.clear()
+                previous.keyframe_jpeg = None
+                previous.keyframe_sequence = None
+                previous.keyframe_timestamp_ms = None
+                previous.measurement = None
+                previous.motion_summary = None
 
     def get(self, session_id: str, token: str) -> CaptureSession:
         with self._lock:
@@ -128,6 +154,7 @@ class SessionManager:
                         session.keyframe_angle = angle
                         session.keyframe_jpeg = jpeg
                         session.keyframe_sequence = sequence
+                        session.keyframe_timestamp_ms = timestamp_ms
                 except ValueError:
                     pass
             return frame
@@ -165,6 +192,7 @@ class SessionManager:
                 session.active = False
                 session.engine.close()
             session.measurement = measurement
+            session.motion_summary = summarize_motion(frames)
             session.frames.clear()
             if (
                 measurement.value_deg is None
@@ -175,6 +203,14 @@ class SessionManager:
                 session.keyframe_jpeg = None
                 session.keyframe_sequence = None
             return measurement
+
+    def completed_details(self, session_id: str, token: str) -> dict:
+        with self._lock:
+            self.completed_measurement(session_id, token)
+            session = self.get(session_id, token)
+            return {"motion": session.motion_summary,
+                    "evidence_sequence": session.keyframe_sequence,
+                    "evidence_timestamp_ms": session.keyframe_timestamp_ms if session.keyframe_jpeg else None}
 
     def completed_snapshot(self, session_id: str, token: str) -> tuple[Measurement, bytes | None]:
         with self._lock:
@@ -187,5 +223,7 @@ class SessionManager:
             self._close_previous()
 
     def close(self) -> None:
+        self._shutdown.set()
         with self._lock:
             self._close_previous()
+        self._reaper.join(timeout=2)
