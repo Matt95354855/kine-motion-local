@@ -30,7 +30,7 @@ Le harness est toujours un contrat de coude : les nouveaux protocoles sont refus
 - Interface inspectée dans le navigateur intégré : sept options présentes, vue de face/profil adaptée, personnage visible et limites de rotation affichées. Aucune caméra physique ouverte pour cette vérification.
 - Moteur réel : modèle SHA-256 vérifié, initialisation et abstention sur une **image noire**, dans l'environnement de pose local. Pas de preuve de précision ni de détection positive d'une personne. Le délégué CPU du Mac utilise aussi des ressources OpenGL auxiliaires.
 - Contrôle de diff/artefacts/secrets usuels avant publication ; scan non exhaustif. Captures de l'interface fictive gardées seulement dans `.cache`, pas dans Git.
-- CI Linux/Windows configurée pour les 60 tests sans poids ni GPU. Les résultats d'exécution distante sont à vérifier sur le commit publié ; cela ne teste pas MediaPipe natif, SSH Windows, webcam ou RTX.
+- **CI Linux/Windows réussie** sur le commit de développement `30fc285` : [exécution 37003791595](https://github.com/Matt95354855/kine-motion-local/actions/runs/37003791595). Les 60 tests tournent sans poids ni GPU ; cela ne teste pas MediaPipe natif, SSH Windows, webcam ou RTX.
 
 ## Non réalisé sur le matériel de l'utilisateur
 
