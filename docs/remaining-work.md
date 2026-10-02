@@ -20,7 +20,9 @@
 - Durée/taille/cadence bornées, un seul traitement image en vol, pas de file qui accumule les images.
 - Démarrages doubles bloqués ; annulation avant permission prise en compte ; flux tardif arrêté.
 - Arrêt média immédiat avant l'attente réseau ; nouvelle séance protégée des réponses tardives, y compris celles du harness existant.
-- Guide animé sur l'image, points du bras, courbe brute, durée/couverture ; image du pic horodatée.
+- Guide **permanent**, adapté à sept mouvements ; cadre indicatif et repères propres à chaque mouvement, courbe brute, durée/couverture ; image du pic horodatée si une mesure existe.
+- Cou : proxy d'inclinaison tête/épaules explicitement limité ; rotation guidée sans angle inventé. Genou, épaule, hanche et tronc : projections expérimentales.
+- Poste webcam séparé du Windows GPU : lanceur de tunnel OpenSSH, API/LLM toujours sur 127.0.0.1, guide d'installation privé ; liaison réelle restant à tester.
 - Rejets de pose absente, plusieurs personnes, repères masqués/hors cadre ; dimensions JPEG bornées avant décompression.
 - Confirmations humaines de profil/stabilité, nouvel essai ; résultats/exports explicitement expérimentaux/brouillons.
 - Expiration automatique et libération des captures sans requête ultérieure.
@@ -33,10 +35,11 @@
 - Tester une détection **positive** du corps : un succès sur image vide prouve l'initialisation et l'abstention seulement.
 - Vérifier le fonctionnement sans accès externe à froid et à chaud : trafic de perception, dépendances et journaux. Aucun firewall système n'a été activé ici.
 - Vérifier les licences du code, des poids et des dépendances ; décider la licence du projet avant redistribution d'un paquet offline.
-- Finaliser avec un kiné la fiche versionnée du coude : position, côté, vue, consigne, début/fin, motifs d'arrêt et critères de rejet. Le guide est une illustration, pas un protocole médical approuvé.
+- Finaliser avec un kiné la fiche versionnée **de chaque mouvement** : position, côté/direction, vue, consigne, début/fin, motifs d'arrêt et critères de rejet. Le guide est une illustration, pas un protocole médical approuvé. Ne pas assimiler le proxy du cou à l'amplitude cervicale.
 - Annoter indépendamment des clips autorisés : bonnes vues, poignet masqué, hors plan, fond difficile, personne supplémentaire et résultats attendus. Aucun clip personnel dans Git.
 - Vérifier physiquement permissions, caméra externe, débranchement, veille, caméra occupée, changement de caméra et rechargement. L'arrêt testé avec média simulé n'est pas certifié pour toutes les caméras.
-- Mesurer les images **présentées**, perdues/sautées et traitées : le compteur actuel donne les traitements, pas le nombre exact de pertes caméra. Le retour > 1 s masque les repères et l'aller-retour est mesuré ; ajouter les percentiles capture → serveur → écran et valider ce seuil provisoire.
+- Mesurer les images **présentées**, perdues/sautées et traitées : le compteur actuel donne les traitements, pas le nombre exact de pertes caméra. P95 d'aller-retour et volume JPEG ajoutés ; isoler capture/réseau/calcul/écran, tester Wi‑Fi/Ethernet et valider le seuil provisoire d'expiration des repères de 1 s.
+- Vérifier SSH sur le Windows : empreinte, compte, restriction du pare-feu, transferts autorisés, port occupé, interruption/reprise et webcam du client. Pas d'API ni de LLM exposés au LAN directement. Pour plusieurs utilisateurs, revoir l'authentification et l'isolation : une nouvelle séance révoque actuellement la précédente.
 - Résoudre les changements silencieux de personne après perte de suivi ; le refus de plusieurs personnes ne fournit pas une identité de suivi persistante.
 - Compléter la qualité : flou, éclairage, taille corporelle, stabilité/hors-plan automatiques. Le seuil de visibilité/pré­sence de 0,5 est technique et provisoire, pas une borne d'erreur angulaire.
 - Filtrer/contrôler les pics parasites : **le maximum reste brut** ; une seule image bruitée peut fournir le pic. Définir filtre, fenêtre, provenance et test sans masquer un vrai maximum.
@@ -82,4 +85,14 @@
 - Pilote supervisé, destination/responsabilités qualifiées et évaluation réglementaire compétente.
 - Validation par protocole : domaine d'emploi, erreurs et abstention documentés.
 
-Smartphone/LAN HTTPS, nouveaux mouvements, 3D, suivi longitudinal et catalogue d'exercices approuvé restent des extensions distinctes. Ne pas exposer ce serveur actuel au réseau ni le transformer en programme autonome.
+Smartphone/HTTPS direct, qualification des nouveaux mouvements, 3D, suivi longitudinal et catalogue d'exercices approuvé restent des extensions distinctes. Le parcours à deux ordinateurs est préparé via SSH, **pas** en exposant ce serveur au réseau. Ne pas le transformer en programme autonome.
+
+## Améliorations proposées, par priorité
+
+1. **Calibrage au repos et qualité automatique** : repères neutres, caméra droite, cadrage/lumière/flou, contrôle du plan ; n'accepter que ce qui est réellement observable.
+2. **Pics robustes et correction humaine** : vérifier les pics sur plusieurs images, afficher les données brutes, corriger/refuser des repères avec provenance et recalcul.
+3. **Parcours de séance guidé** : enchaîner les mouvements choisis, comparaison descriptive gauche/droite sous conditions comparables, fiche courte par essai ; pas de prescription automatique.
+4. **Retour distant plus stable** : comparer Wi‑Fi/Ethernet, cadence adaptative et budget de latence ; tests de coupure, reconnexion volontaire, détection des changements de personne.
+5. **Revue et validation professionnelle** : décision explicite, identité du réviseur et historique ; avant patients seulement, gestion protégée des dossiers et des accès.
+
+Le contrat multi-protocoles du harness pourra être une étape séparée si autorisée ; les modèles et leur FP4 restent inchangés.

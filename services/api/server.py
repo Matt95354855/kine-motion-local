@@ -1,4 +1,4 @@
-"""Serveur de démonstration local, sans stockage de captures."""
+"""Serveur POC sur boucle locale, utilisable via tunnel, sans stockage de captures."""
 
 import argparse
 import json
@@ -16,6 +16,7 @@ from packages.harness.local_llm import LocalLLMClient
 from packages.harness.runner import run_harness
 from packages.harness.tools import ToolContext
 from packages.biomechanics.motion import frame_angle
+from packages.biomechanics.protocols import get_protocol, protocol_catalog, render_protocol_draft, selected_points
 from packages.pose.mediapipe_engine import MediaPipePoseEngine
 from packages.pose.synthetic_engine import SyntheticPoseEngine
 from services.api.state import MAX_JPEG_BYTES, SessionManager
@@ -49,6 +50,7 @@ def make_handler(
     pose_mode: str = "experimental",
     llm_vision: bool = False,
     model_bindings: dict[str, ModelBinding] | None = None,
+    remote_client: bool = False,
 ):
     bindings = model_bindings or configured_models()
     if llm_client is not None:
@@ -119,6 +121,9 @@ def make_handler(
                 if path == "/api/status":
                     self._json(200, {
                         "pose_mode": pose_mode,
+                        "protocols": protocol_catalog(),
+                        "topology": {"camera": "browser_client", "compute": "server", "remote_client": remote_client,
+                                     "connection": "ssh_tunnel_required" if remote_client else "loopback"},
                         "capture_limits": {"max_frames": 600, "max_jpeg_bytes": MAX_JPEG_BYTES, "sampling_interval_ms": 200},
                         "llm_configured": any(item.client is not None for item in bindings.values()),
                         "llm_vision": any(item.image_enabled for item in bindings.values()),
@@ -157,7 +162,7 @@ def make_handler(
                 path = urlsplit(self.path).path
                 if path == "/api/session/start":
                     doc = self._document()
-                    session = manager.start(doc.get("side"))
+                    session = manager.start(doc.get("side"), doc.get("protocol_id", "elbow_flexion_active"))
                     self._json(201, {"session_id": session.session_id, "token": session.token})
                 elif path == "/api/frame":
                     if self.headers.get("Content-Type") != "image/jpeg":
@@ -169,10 +174,16 @@ def make_handler(
                         int(self.headers.get("X-Sequence", "-1")),
                         int(self.headers.get("X-Timestamp-Ms", "-1")),
                     )
+                    protocol = get_protocol(frame.protocol_id)
+                    points = selected_points(frame, frame.side)
+                    connections = [[0, 1], [1, 2]] if len(points) == 3 else [[0, 1], [2, 3]]
                     self._json(200, {"sequence": frame.sequence, "timestamp_ms": frame.timestamp_ms,
                                      "quality_reason": frame.quality_reason,
                                      "angle_deg": frame_angle(frame),
                                      "pose": {"width_px": frame.width_px, "height_px": frame.height_px,
+                                              "protocol_id": protocol.id,
+                                              "points": [asdict(p) if p else None for p in points],
+                                              "connections": connections,
                                               "shoulder": asdict(frame.shoulder) if frame.shoulder else None,
                                               "elbow": asdict(frame.elbow) if frame.elbow else None,
                                               "wrist": asdict(frame.wrist) if frame.wrist else None}})
@@ -185,9 +196,7 @@ def make_handler(
                         True if doc.get("camera_stable_confirmed") is True else None,
                         doc.get("stopped") is True,
                     )
-                    from packages.harness.report import render_draft
-
-                    self._json(200, {"measurement": asdict(measurement), "draft": render_draft(measurement),
+                    self._json(200, {"measurement": asdict(measurement), "draft": render_protocol_draft(measurement),
                                      **manager.completed_details(doc.get("session_id", ""), doc.get("token", ""))})
                 elif path == "/api/session/evidence":
                     doc = self._document()
@@ -211,6 +220,9 @@ def make_handler(
                         raise ValueError("Image non autorisée pour ce modèle")
                     session_id, token = doc.get("session_id", ""), doc.get("token", "")
                     measurement, keyframe = manager.completed_snapshot(session_id, token)
+                    if measurement.protocol_id != "elbow_flexion_active":
+                        self._json(409, {"error": "protocol_not_supported_by_harness"})
+                        return
                     result = run_harness(
                         ToolContext(session_id, measurement, keyframe if include_image else None),
                         binding.client,
@@ -250,6 +262,7 @@ def make_handler(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Prototype de capture locale")
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--remote-client", action="store_true", help="Caméra sur un autre poste via tunnel SSH ; écoute toujours 127.0.0.1")
     parser.add_argument("--pose-model", default=os.environ.get("KINE_POSE_MODEL"))
     parser.add_argument("--demo-pose", action="store_true", help="Pose fictive : n'analyse pas les pixels")
     parser.add_argument("--experimental-pose", action="store_true", help="Activer l'adaptateur MediaPipe non vérifié hors ligne")
@@ -290,6 +303,7 @@ def main() -> None:
             "synthetic_demo" if args.demo_pose else "mediapipe_experimental",
             args.llm_vision,
             models,
+            args.remote_client,
         ),
     )
     print(f"Prototype local : http://127.0.0.1:{server.server_port}")

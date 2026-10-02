@@ -1,9 +1,9 @@
-"""Contrats minimaux pour le protocole synthétique de flexion du coude.
+"""Contrats de capture POC ; compatibilité conservée avec le protocole du coude.
 
 Ces objets ne contiennent aucune identité patient et ne constituent pas un dossier clinique.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from math import isfinite
 
@@ -45,6 +45,9 @@ class PoseFrame:
     view_is_valid: bool | None = None
     camera_stable: bool | None = None
     quality_reason: str | None = None
+    landmarks: dict[str, Point2D | None] = field(default_factory=dict)
+    protocol_id: str = "elbow_flexion_active"
+    side: str = "left"
 
     def __post_init__(self) -> None:
         if self.sequence < 0 or not isfinite(self.timestamp_ms) or self.timestamp_ms < 0:

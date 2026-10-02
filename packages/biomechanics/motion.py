@@ -1,16 +1,11 @@
 """Résumé temporel descriptif ; aucun seuil clinique ni comptage thérapeutique."""
 
-from packages.biomechanics.geometry import apparent_elbow_flexion_deg
+from packages.biomechanics.protocols import angle_and_reason
 from packages.contracts.models import PoseFrame
 
 
 def frame_angle(frame: PoseFrame) -> float | None:
-    if frame.quality_reason or any(point is None for point in (frame.shoulder, frame.elbow, frame.wrist)):
-        return None
-    try:
-        return apparent_elbow_flexion_deg(frame.shoulder, frame.elbow, frame.wrist, frame.width_px, frame.height_px)
-    except ValueError:
-        return None
+    return angle_and_reason(frame, frame.side)[0]
 
 
 def summarize_motion(frames: tuple[PoseFrame, ...]) -> dict:

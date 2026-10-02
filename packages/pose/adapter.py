@@ -1,6 +1,6 @@
 """Interface de perception : aucun moteur externe n'est imposé au harness."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 from packages.contracts.models import Point2D
@@ -14,6 +14,7 @@ class PoseObservation:
     elbow: Point2D | None
     wrist: Point2D | None
     quality_reason: str | None = None
+    landmarks: dict[str, Point2D | None] = field(default_factory=dict)
 
 
 class PoseEngine(Protocol):

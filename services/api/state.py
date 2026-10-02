@@ -7,8 +7,7 @@ from time import monotonic
 from typing import Callable
 from uuid import uuid4
 
-from packages.biomechanics.elbow import assess_elbow_trial
-from packages.biomechanics.geometry import apparent_elbow_flexion_deg
+from packages.biomechanics.protocols import angle_and_reason, assess_trial, get_protocol
 from packages.biomechanics.motion import summarize_motion
 from packages.contracts.models import ElbowTrial, Measurement, PoseFrame
 from packages.pose.adapter import PoseEngine
@@ -24,6 +23,7 @@ class CaptureSession:
     token: str
     side: str
     engine: PoseEngine
+    protocol_id: str = "elbow_flexion_active"
     frames: list[PoseFrame] = field(default_factory=list)
     measurement: Measurement | None = None
     active: bool = True
@@ -53,9 +53,10 @@ class SessionManager:
                 if self._session and monotonic() > self._session.expires_at:
                     self._close_previous()
 
-    def start(self, side: str) -> CaptureSession:
+    def start(self, side: str, protocol_id: str = "elbow_flexion_active") -> CaptureSession:
         if side not in ("left", "right"):
             raise ValueError("Côté anatomique requis")
+        get_protocol(protocol_id)
         with self._lock:
             self._close_previous()
             session = CaptureSession(
@@ -63,6 +64,7 @@ class SessionManager:
                 token=token_urlsafe(32),
                 side=side,
                 engine=self._engine_factory(),
+                protocol_id=protocol_id,
                 expires_at=monotonic() + self._ttl_seconds,
             )
             self._session = session
@@ -134,29 +136,19 @@ class SessionManager:
                 elbow=observation.elbow,
                 wrist=observation.wrist,
                 quality_reason=observation.quality_reason,
+                landmarks=dict(observation.landmarks),
+                protocol_id=session.protocol_id,
+                side=session.side,
             )
+            angle, reason = angle_and_reason(frame, session.side)
+            if reason != "rotation_not_measurable_2d":
+                frame = replace(frame, quality_reason=reason)
             session.frames.append(frame)
-            if (
-                observation.quality_reason is None
-                and observation.shoulder is not None
-                and observation.elbow is not None
-                and observation.wrist is not None
-            ):
-                try:
-                    angle = apparent_elbow_flexion_deg(
-                        observation.shoulder,
-                        observation.elbow,
-                        observation.wrist,
-                        observation.width_px,
-                        observation.height_px,
-                    )
-                    if angle > session.keyframe_angle:
-                        session.keyframe_angle = angle
-                        session.keyframe_jpeg = jpeg
-                        session.keyframe_sequence = sequence
-                        session.keyframe_timestamp_ms = timestamp_ms
-                except ValueError:
-                    pass
+            if angle is not None and angle > session.keyframe_angle:
+                session.keyframe_angle = angle
+                session.keyframe_jpeg = jpeg
+                session.keyframe_sequence = sequence
+                session.keyframe_timestamp_ms = timestamp_ms
             return frame
 
     def finish(
@@ -187,7 +179,7 @@ class SessionManager:
                 stopped=stopped,
             )
             try:
-                measurement = assess_elbow_trial(trial)
+                measurement = assess_trial(trial, session.protocol_id)
             finally:
                 session.active = False
                 session.engine.close()

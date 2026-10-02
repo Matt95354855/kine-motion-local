@@ -1,6 +1,6 @@
 # Matrice d'acceptation initiale
 
-État au 2 octobre 2026 : parcours web expérimental et calculs synthétiques vérifiés ; moteur réel initialisé sur image vide. `À définir` signifie qu'un protocole, un seuil ou une procédure doit encore être fixé avant de conclure. Ni la simulation ni l'initialisation ne prouvent l'aptitude clinique. Les preuves détaillées figurent dans `progress-2026-10-02.md`.
+État au 2 octobre 2026 : parcours web expérimental et calculs synthétiques vérifiés ; moteur réel initialisé sur image vide. Sept mouvements POC et parcours SSH à deux postes ajoutés, sans validation clinique ni connexion au Windows de l'utilisateur. `À définir` signifie qu'un protocole, un seuil ou une procédure doit encore être fixé avant de conclure. Les preuves figurent dans `progress-2026-10-02.md` et `progress-multi-protocol.md`.
 
 | Exigence | Résultat observable à obtenir | Vérification / preuve à conserver | État |
 | --- | --- | --- | --- |
@@ -10,10 +10,10 @@
 | `REQ-TRACE-001` | Chaque résultat montre ses preuves et versions. | Inspection d'un export après changement de version. | Partiel : image du pic/horodatage, courbe et versions mesure/capture ; manifeste complet à ajouter. |
 | `REQ-SCOPE-001` | Aucune donnée de l'ancienne séance dans le nouveau dossier. | Test de changement de dossier avec réponse tardive. | Partiel : jetons, ancienne preuve refusée, réponses tardives ignorées en tests ; pas de dossier patient. |
 | `REQ-CAPTURE-001` | Caméra contrôlable, arrêt effectif, aucun audio. | Tests permission, déconnexion, arrêt et inspection des pistes. | Partiel : aperçu/démarrage séparés, choix caméra, piste tardive arrêtée et arrêt avant réponse testés avec média simulé ; matrice physique à faire. |
-| `REQ-PROTOCOL-001` | Protocole complet et versionné requis avant mesure. | Validation du schéma de protocole et exemples invalides. | À définir |
+| `REQ-PROTOCOL-001` | Protocole complet et versionné requis avant mesure. | Validation du schéma de protocole et exemples invalides. | Partiel : catalogue unique versionné de sept mouvements, contrôles/rapports adaptés ; fiches professionnelles à approuver. |
 | `REQ-MEASURE-001` | Angle, excursion, durée et répétitions correctement nommés. | Squelettes synthétiques et revue des libellés. | Partiel : angle maximal brut apparent, durée/temps source, excursion brute en données de test ; pas de répétitions. |
 | `REQ-QUALITY-001` | Quatre statuts distincts et motifs lisibles. | Clips de rejet, limitation, arrêt et non-réalisation. | Partiel : statuts et motifs testés sur repères synthétiques. |
-| `REQ-ABSTAIN-001` | Une capture hors plan ne produit pas de mesure fiable. | Cas d'occlusion, changement de vue et valeurs `null`. | Partiel : abstention selon drapeaux de qualité fournis en entrée. |
+| `REQ-ABSTAIN-001` | Une capture hors plan ne produit pas de mesure fiable. | Cas d'occlusion, changement de vue et valeurs `null`. | Partiel : abstention selon drapeaux fournis, qualité par repère/protocole ; rotation du cou non quantifiée, inclinaison proxy explicitement limitée. |
 | `REQ-SOURCE-001` | Déclaration et saisie manuelle identifiées. | Export avec valeur inconnue, douleur et mesure instrumentée. | À faire |
 | `REQ-REPORT-001` | Aucun chiffre généré ne remplace une mesure structurée. | Injection d'un chiffre contradictoire dans une réponse simulée. | Partiel : brouillon déterministe et note distincte ; refus d'un chiffre inventé simulé, contrôle sémantique complet restant. |
 | `REQ-FALLBACK-001` | Brouillon disponible avec LLM arrêté. | Parcours synthétique sans serveur de génération. | Parcours synthétique API sans LLM testé ; panne d'un vrai serveur restant. |

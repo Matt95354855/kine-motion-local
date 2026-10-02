@@ -20,6 +20,12 @@ h1 { margin: 0; font-size: clamp(1.5rem, 3vw, 2rem); font-weight: 550; letter-sp
 .capture-card, .results-card, .assistant-panel { background: white; border: 1px solid var(--line); border-radius: 15px; overflow: hidden; margin-bottom: 1.25rem; }
 .protocol-bar { padding: 1.1rem 1.35rem; display: flex; align-items: center; justify-content: space-between; gap: 1rem; } .protocol-name { display: flex; align-items: center; gap: .85rem; }
 .protocol-name strong { display: block; font-size: .95rem; font-weight: 600; } .protocol-name span:not(.step-number) { display: block; font-size: .75rem; color: var(--muted); margin-top: .3rem; }
+#protocol { max-width: 350px; width: 100%; padding: .45rem .65rem; font-weight: 600; background: #f6f9f3; }
+.framing-guide { position: absolute; inset: 0; pointer-events: none; color: #d5eadd88; }
+.framing-outline { position: absolute; left: 19%; top: 15%; width: 45%; height: 69%; border: 1px dashed #b9e7d13d; border-radius: 45% 45% 20% 20%; }
+.framing-guide[data-view=profil] .framing-outline { left: 25%; width: 30%; }
+#framing-label { position: absolute; top: 4.5rem; left: 1.3rem; font-size: .65rem; max-width: 60%; }
+.camera-stage:has(#empty-state:not([hidden])) .framing-guide { opacity: .35; }
 .step-number { background: #f1f5eb; color: #567454; padding: .7rem; border-radius: 9px; font-size: .8rem; } .protocol-options { display: flex; align-items: center; gap: .4rem; }
 .camera-stage { position: relative; width: 100%; aspect-ratio: 16 / 9; background: radial-gradient(ellipse at 30% 70%, #25332e, #19231f 75%); overflow: hidden; }
 #preview, #evidence, #pose-overlay { position: absolute; width: 100%; height: 100%; inset: 0; object-fit: contain; } #preview.mirrored, #evidence.mirrored { transform: scaleX(-1); } #pose-overlay { pointer-events: none; }
@@ -51,3 +57,4 @@ footer { display: flex; justify-content: space-between; gap: 1rem; color: #8a948
 .sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; }
 @media (max-width: 760px) { main { padding: 0 1rem 1.5rem; } .topbar { height: 68px; } .page-title { padding: 1.4rem 0 1rem; } .prototype { display: none; } .protocol-bar { flex-wrap: wrap; padding: .9rem; } .protocol-options { width: 100%; justify-content: space-between; } .camera-stage { aspect-ratio: 4 / 3; } .guide-panel { width: 118px; bottom: 3.2rem; right: .75rem; } #guide-avatar { height: 133px; } .guide-panel figcaption { font-size: .57rem; } .capture-controls { padding: .9rem; } .source-controls, .trial-controls { width: 100%; } #record { flex: 1; } #camera-device { max-width: 145px; } .capture-bottom { padding: 0 .9rem .8rem; flex-wrap: wrap; } .metrics { gap: .5rem; } .metric { padding: .8rem; } .metric strong { font-size: 1.2rem; } .results-card { padding: 1rem; } footer { flex-direction: column; gap: .3rem; } .empty-state { left: 35%; max-width: 45%; } .empty-state strong { font-size: .8rem; } .empty-state span { font-size: .66rem; } }
 @media (prefers-reduced-motion: reduce) { button { transition: none; } }
+@media (max-width: 500px) { .badges { flex-direction: column; align-items: flex-end; gap: .25rem; font-size: .63rem; } .badge { font-size: .65rem; } .protocol-name { width: 100%; } .protocol-name > div { min-width: 0; flex: 1; } #protocol { max-width: 100%; } #framing-label { top: 3.5rem; left: .9rem; font-size: .58rem; } .live-feedback { font-size: .66rem; left: .75rem; } }

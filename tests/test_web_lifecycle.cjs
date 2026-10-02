@@ -20,6 +20,7 @@ function environment(customFetch) {
       this.textContent = ''; this.checked = false; this.readyState = 2; this.videoWidth = 640;
       this.videoHeight = 480; this.currentTime = 0; this.duration = 4; this.files = [];
       this.handlers = new Map();
+      this.dataset = {};
       this.classList = { add() {}, remove() {}, toggle() {} };
     }
     addEventListener(name, fn) { this.handlers.set(name, fn); }
@@ -30,6 +31,7 @@ function environment(customFetch) {
     pause() { this.paused = true; }
     load() {}
     removeAttribute() {}
+    setAttribute() {}
     replaceChildren() {}
     click() { return this.handlers.get('click')?.(); }
   }
@@ -51,7 +53,7 @@ function environment(customFetch) {
       addEventListener: (name, fn) => events.set(name, fn) },
     window: { addEventListener: (name, fn) => events.set(name, fn) },
     navigator: { sendBeacon() {} }, performance: { now: () => 1000 },
-    KineCapture: { CaptureClock, landmarkPosition }, KineGuide: { drawPose() {}, drawChart() {}, setSide() {}, toggle() {} },
+    KineCapture: { CaptureClock, landmarkPosition }, KineGuide: { drawPose() {}, drawChart() {}, setSide() {}, setProtocol() {} },
     ResizeObserver: class { observe() {} }, AbortController, Blob, Uint8Array, atob,
     URL: { createObjectURL: () => 'blob:test', revokeObjectURL() {} },
     setTimeout: (fn) => { const id = ++nextTimer; timers.set(id, fn); return id; },
@@ -65,7 +67,7 @@ function environment(customFetch) {
   };
   vm.createContext(sandbox);
   vm.runInContext(fs.readFileSync(require.resolve('../apps/web/app.js'), 'utf8'), sandbox);
-  return { get, sandbox, requests, run: (code) => vm.runInContext(code, sandbox) };
+  return { get, sandbox, requests, timers, run: (code) => vm.runInContext(code, sandbox) };
 }
 const settle = () => new Promise((resolve) => setImmediate(resolve));
 async function prepareFile(env) {
@@ -143,5 +145,59 @@ test('exportable structured result contains neither token nor pixels', async () 
   assert.ok(exported.includes('synthetic_demo'));
   assert.ok(!exported.includes('private-token'));
   assert.ok(!exported.includes('jpeg_base64'));
+  await env.run('cancelSession()');
+});
+test('selected protocol is sent to the server and capture view must be reconfirmed', async () => {
+  const env = environment();
+  await prepareFile(env);
+  env.get('view-confirmed').checked = true;
+  env.run('protocols.push({id:"knee_flexion_active",label:"Genou",view:"profil",framing:"Hanche, genou, cheville",guide:"knee",quantified:true,harness_supported:false})');
+  env.get('protocol').value = 'knee_flexion_active';
+  await env.get('protocol').handlers.get('change')();
+  assert.equal(env.get('view-confirmed').checked, false);
+  assert.equal(env.get('record').disabled, false);
+  await env.run('startTrial()');
+  assert.equal(JSON.parse(env.requests.find((r) => r.path === '/api/session/start').options.body).protocol_id, 'knee_flexion_active');
+  assert.equal(env.get('protocol').disabled, true);
+  await env.run('finishSession(false)');
+  assert.equal(env.get('llm-draft').disabled, true);
+  await env.get('llm-draft').click();
+  assert.equal(env.requests.filter((r) => r.path === '/api/harness/draft').length, 0);
+  assert.equal(env.run('resultDocument.protocol.id'), 'knee_flexion_active');
+  await env.run('cancelSession()');
+});
+test('neck rotation is guide only and never displays a measured angle curve', async () => {
+  const env = environment((path) => path === '/api/session/finish' ? {
+    measurement: { status: 'rejected', value_deg: null, valid_frame_count: 0, total_frame_count: 3 },
+    motion: { duration_ms: 400, samples: [], processing_rate_hz: 5, processed_frames: 3 },
+    evidence_sequence: null, evidence_timestamp_ms: null, draft: 'Rotation non quantifiée en 2D',
+  } : undefined);
+  await prepareFile(env);
+  env.run('protocols.push({id:"neck_rotation_guided",label:"Cou",view:"face",framing:"Tête et épaules",guide:"neck_turn",quantified:false,harness_supported:false})');
+  env.get('protocol').value = 'neck_rotation_guided';
+  await env.get('protocol').handlers.get('change')();
+  await env.run('startTrial()'); await env.run('finishSession(false)');
+  assert.equal(env.get('angle-result').textContent, '—');
+  assert.equal(env.get('chart-wrap').hidden, true);
+  assert.equal(env.get('coverage-result').textContent, 'Non quantifié');
+  assert.equal(env.get('measurement-status').textContent, 'Guide seul · sans mesure');
+  await env.run('cancelSession()');
+});
+test('previous protocol result is removed when switching to a different movement', async () => {
+  const env = environment();
+  await prepareFile(env); await env.run('startTrial()'); await env.run('finishSession(false)');
+  await env.get('protocol').handlers.get('change')();
+  assert.equal(env.get('results').hidden, true);
+  assert.equal(env.run('session'), null);
+  assert.equal(env.run('resultDocument'), null);
+});
+test('pose overlay expires even while the next network request is pending', async () => {
+  const env = environment((path) => path === '/api/frame' ? { sequence: 0, angle_deg: 90, quality_reason: null, pose: {points:[]} } : undefined);
+  await prepareFile(env); await env.run('startTrial()');
+  assert.notEqual(env.run('latestPose'), null);
+  const expiry = env.run('poseExpiryTimer');
+  env.timers.get(expiry)();
+  assert.equal(env.run('latestPose'), null);
+  assert.ok(env.get('live-feedback').textContent.includes('expirés'));
   await env.run('cancelSession()');
 });

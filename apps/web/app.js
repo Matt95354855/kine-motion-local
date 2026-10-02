@@ -9,13 +9,18 @@ const MAX_DURATION_MS = 120000;
 let phase = "idle", epoch = 0, session = null, stream = null, source = null;
 let fileUrl = null, evidenceUrl = null, timer = null, expiryTimer = null, pending = null;
 let trialDeadlineTimer = null;
+let poseExpiryTimer = null;
 let sequence = 0, startedAt = 0, clock = null, resultDocument = null, latestPose = null;
 let models = [], demo = false, llmBusy = false, serverReady = false;
 let limits = { max_frames: 600, sampling_interval_ms: 200 };
+let protocols = [{ id: "elbow_flexion_active", label: "Coude · flexion", view: "profil",
+  framing: "Épaule, coude et poignet visibles", guide: "elbow", side_kind: "anatomical",
+  metric_label: "Flexion apparente", quantified: true, harness_supported: true }];
+let protocol = protocols[0], networkSamples = [];
 const qualityLabels = {
   no_pose: "Personne non détectée", multiple_people: "Une seule personne dans le cadre",
-  occlusion: "Gardez épaule, coude et poignet visibles", out_of_frame: "Reculez pour cadrer le bras",
-  degenerate_landmarks: "Repères du bras insuffisants",
+  occlusion: "Repères masqués", out_of_frame: "Repères hors du cadre",
+  degenerate_landmarks: "Repères insuffisants",
 };
 function message(error) {
   return ({ NotAllowedError: "Permission caméra refusée", NotFoundError: "Aucune caméra trouvée",
@@ -30,7 +35,8 @@ async function request(path, options = {}, timeout = 15000) {
     const response = await fetch(path, { cache: "no-store", ...options, signal: controller.signal });
     const body = await response.json();
     if (!response.ok) throw new Error(({ forbidden: "Séance expirée ou non autorisée",
-      invalid_request: "Capture ou paramètres invalides", pose_engine_unavailable: "Moteur de pose indisponible" })[body.error] || `Erreur ${response.status}`);
+      invalid_request: "Capture ou paramètres invalides", pose_engine_unavailable: "Moteur de pose indisponible",
+      protocol_not_supported_by_harness: "L’assistant actuel prend en charge le coude uniquement" })[body.error] || `Erreur ${response.status}`);
     return body;
   } finally { clearTimeout(timeoutId); controllers.delete(controller); }
 }
@@ -43,15 +49,17 @@ function controls() {
   $("video-file").disabled = locked || !serverReady;
   $("camera-device").disabled = locked;
   $("side").disabled = locked;
+  $("protocol").disabled = locked || !serverReady;
   $("record").disabled = phase !== "ready";
   $("finish").disabled = phase !== "recording";
   $("stop").disabled = ["idle", "completed", "finishing"].includes(phase);
-  $("llm-draft").disabled = phase !== "completed" || llmBusy;
+  $("llm-draft").disabled = phase !== "completed" || llmBusy || !protocol.harness_supported;
 }
 function setPhase(value) { phase = value; controls(); }
 function releaseMedia() {
   clearInterval(timer); timer = null;
   clearTimeout(trialDeadlineTimer); trialDeadlineTimer = null;
+  clearTimeout(poseExpiryTimer); poseExpiryTimer = null;
   preview.onended = preview.onerror = null;
   if (stream) stream.getTracks().forEach((track) => { track.onended = null; track.stop(); });
   stream = null;
@@ -61,6 +69,7 @@ function releaseMedia() {
 }
 function clearResults() {
   resultDocument = null; latestPose = null;
+  networkSamples = [];
   if (evidenceUrl) URL.revokeObjectURL(evidenceUrl);
   evidenceUrl = null;
   $("evidence").removeAttribute("src"); $("evidence").hidden = true;
@@ -178,16 +187,25 @@ async function sampleFrame() {
       "Content-Type": "image/jpeg", "X-Session-Id": currentSession.session_id,
       "X-Session-Token": currentSession.token, "X-Sequence": String(currentSequence), "X-Timestamp-Ms": String(timestamp),
     }, body: blob });
-    if (operation !== epoch || phase !== "recording") return;
+    if (operation !== epoch) return;
     const latencyMs = Math.round(performance.now() - capturedAt);
+    networkSamples.push({ sequence: currentSequence, roundtrip_ms: latencyMs, jpeg_bytes: blob.size });
+    if (phase !== "recording") return;
     const delayed = latencyMs > 1000;
     latestPose = response.quality_reason || delayed ? null : response.pose;
     KineGuide.drawPose($("pose-overlay"), latestPose, source.mirrored_preview);
+    clearTimeout(poseExpiryTimer);
+    if (latestPose) poseExpiryTimer = setTimeout(() => {
+      if (operation !== epoch || phase !== "recording") return;
+      latestPose = null; KineGuide.drawPose($("pose-overlay"), null, false);
+      $("live-feedback").textContent = "Repères expirés — attente de l’analyse";
+    }, Math.max(0, 1000 - latencyMs));
     const feedback = response.quality_reason ? qualityLabels[response.quality_reason] || "Capture à vérifier" :
-      response.angle_deg === null ? "Bras non exploitable" : `${Math.round(response.angle_deg)}° · angle apparent`;
+      !protocol.quantified ? "Observation guidée · aucun angle calculé" :
+      response.angle_deg === null ? "Repères non exploitables" : `${Math.round(response.angle_deg)}° · projection 2D`;
     $("live-feedback").textContent = (demo ? "Simulation · " : "") +
       (delayed ? "Analyse retardée — repères masqués" : feedback);
-    $("frame-status").textContent = `${response.sequence + 1} images traitées`;
+    $("frame-status").textContent = `${response.sequence + 1} images · ${latencyMs} ms`;
     $("frame-status").title = `Aller-retour traitement : ${latencyMs} ms`;
     const seconds = Math.floor(timestamp / 1000);
     $("elapsed").textContent = `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
@@ -203,7 +221,7 @@ async function startTrial() {
   const operation = epoch;
   setPhase("starting");
   try {
-    const created = await jsonPost("/api/session/start", { side: $("side").value });
+    const created = await jsonPost("/api/session/start", { side: $("side").value, protocol_id: protocol.id });
     if (operation !== epoch) {
       fetch("/api/session/cancel", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(created), keepalive: true }); return;
     }
@@ -235,15 +253,21 @@ async function finishSession(stopped) {
     const response = await jsonPost("/api/session/finish", { ...currentSession,
       view_confirmed: $("view-confirmed").checked, camera_stable_confirmed: $("stable-confirmed").checked, stopped });
     if (operation !== epoch) return;
-    resultDocument = { schema_version: "1.0", capture_version: "0.2.0-dev", mode: demo ? "synthetic_demo" : "mediapipe_experimental", source,
+    const sortedLatency = networkSamples.map((sample) => sample.roundtrip_ms).sort((a, b) => a - b);
+    resultDocument = { schema_version: "1.1", capture_version: "0.3.0-dev", mode: demo ? "synthetic_demo" : "mediapipe_experimental", source,
+      protocol: { ...protocol }, network: { processed_requests: networkSamples.length,
+        total_jpeg_bytes: networkSamples.reduce((total, sample) => total + sample.jpeg_bytes, 0),
+        roundtrip_p95_ms: sortedLatency.length ? sortedLatency[Math.ceil(sortedLatency.length * 0.95) - 1] : null },
       measurement: response.measurement, motion: response.motion, evidence_sequence: response.evidence_sequence,
       evidence_timestamp_ms: response.evidence_timestamp_ms, professional_validation: false };
     const measurement = response.measurement, motion = response.motion;
     $("results").hidden = false;
+    $("metric-label").textContent = protocol.metric_label;
+    $("chart-wrap").hidden = !protocol.quantified;
     $("angle-result").textContent = measurement.value_deg === null ? "—" : `${measurement.value_deg.toFixed(1)}°${demo ? " · simulé" : ""}`;
     $("duration-result").textContent = `${(motion.duration_ms / 1000).toFixed(1)} s`;
-    $("coverage-result").textContent = `${measurement.valid_frame_count} / ${measurement.total_frame_count}`;
-    $("measurement-status").textContent = demo ? "Simulation — non clinique" :
+    $("coverage-result").textContent = protocol.quantified ? `${measurement.valid_frame_count} / ${measurement.total_frame_count}` : "Non quantifié";
+    $("measurement-status").textContent = stopped ? "Essai interrompu" : !protocol.quantified ? "Guide seul · sans mesure" : demo ? "Simulation — non clinique" :
       ({ valid: "Expérimental — à vérifier", limited: "Capture limitée", rejected: "Essai non exploitable", not_performed: "Non réalisé" })[measurement.status];
     $("draft").textContent = (demo ? "SIMULATION : les pixels ne sont pas analysés.\n\n" : "") + response.draft;
     $("evidence-label").textContent = response.evidence_timestamp_ms === null ? "Aucune image probante" :
@@ -251,9 +275,9 @@ async function finishSession(stopped) {
     KineGuide.drawPose($("pose-overlay"), null, false);
     KineGuide.drawChart($("angle-chart"), motion.samples);
     $("export-report").disabled = $("export-json").disabled = false;
-    $("capture-badge").textContent = "Essai terminé";
-    $("live-feedback").textContent = measurement.value_deg === null ?
-      "Mesure non disponible — consultez les limites" : "Résultat expérimental, à vérifier";
+    $("capture-badge").textContent = stopped ? "Essai interrompu" : "Essai terminé";
+    $("live-feedback").textContent = stopped ? "Essai interrompu · aucune valeur publiée" : measurement.value_deg === null ?
+      (!protocol.quantified ? "Rotation guidée terminée · aucune amplitude mesurée" : "Mesure non disponible — consultez les limites") : "Résultat expérimental, à vérifier";
     $("frame-status").textContent = `${motion.processing_rate_hz} images/s · ${motion.processed_frames} traitées`;
     $("capture-details").textContent = "Caméra arrêtée · une seule image de preuve en mémoire, effacée au nouvel essai";
     setPhase("completed");
@@ -282,7 +306,23 @@ function updateModelSelection() {
   $("include-image").disabled = !selected?.image_enabled;
   if (!selected?.image_enabled) $("include-image").checked = false;
   $("check-model").disabled = !selected?.configured;
-  $("model-status").textContent = selected?.configured ? "Serveur configuré, non encore vérifié" : "Sans serveur : brouillon déterministe disponible";
+  $("model-status").textContent = !protocol.harness_supported ? "Assistant inchangé : disponible pour le coude uniquement. Brouillon descriptif pour ce mouvement." :
+    selected?.configured ? "Serveur configuré, non encore vérifié" : "Sans serveur : brouillon déterministe disponible";
+}
+function updateProtocol() {
+  protocol = protocols.find((item) => item.id === $("protocol").value) || protocols[0];
+  $("protocol-framing").textContent = `Vue de ${protocol.view} · ${protocol.framing}`;
+  $("view-label").textContent = `Vue de ${protocol.view}`;
+  $("framing-prompt").textContent = `Placez-vous de ${protocol.view}`;
+  $("framing-label").textContent = protocol.framing;
+  $("framing-guide").title = "Cadrage indicatif : ce dessin ne valide pas automatiquement votre position.";
+  $("protocol").title = protocol.limitation || "Projection 2D expérimentale, à vérifier.";
+  $("framing-guide").dataset.view = protocol.view;
+  $("side").setAttribute("aria-label", protocol.side_kind === "direction" ? "Direction demandée au guide, non vérifiée automatiquement" : "Côté anatomique observé");
+  $("view-confirmed").checked = $("stable-confirmed").checked = false;
+  KineGuide.setProtocol(protocol.guide, protocol.label);
+  $("live-feedback").textContent = !protocol.quantified ? "Guide seul · rotation non mesurable en 2D" : "Personnage illustratif · repères verts expérimentaux";
+  updateModelSelection(); controls();
 }
 $("camera-start").addEventListener("click", () => prepare("camera"));
 $("video-file").addEventListener("change", () => { const file = $("video-file").files[0]; $("video-file").value = ""; if (file) prepare("file", file); });
@@ -291,8 +331,17 @@ $("record").addEventListener("click", startTrial);
 $("finish").addEventListener("click", () => finishSession(false));
 $("stop").addEventListener("click", () => { if (phase === "recording") finishSession(true); else cancelSession(); });
 $("restart").addEventListener("click", () => { cancelSession(); $("capture-details").textContent = "Prêt pour un nouvel essai"; $("frame-status").textContent = "Aucune image analysée"; });
-$("side").addEventListener("change", () => KineGuide.setSide($("side").value));
-$("guide-toggle").addEventListener("click", KineGuide.toggle);
+$("side").addEventListener("change", async () => {
+  if (phase === "completed") await cancelSession();
+  $("view-confirmed").checked = false;
+  KineGuide.setSide($("side").value);
+});
+$("protocol").addEventListener("change", async () => {
+  if (!["idle", "ready", "completed"].includes(phase)) return;
+  if (phase === "completed") await cancelSession();
+  latestPose = null; KineGuide.drawPose($("pose-overlay"), null, false);
+  updateProtocol();
+});
 $("export-report").addEventListener("click", () => { if (resultDocument) download($("draft").textContent, "text/plain;charset=utf-8", "txt"); });
 $("export-json").addEventListener("click", () => { if (resultDocument) download(JSON.stringify(resultDocument, null, 2), "application/json", "json"); });
 $("llm-model").addEventListener("change", updateModelSelection);
@@ -307,7 +356,7 @@ $("check-model").addEventListener("click", async () => {
   } catch (error) { $("model-status").textContent = message(error); }
 });
 $("llm-draft").addEventListener("click", async () => {
-  if (phase !== "completed" || llmBusy || !session) return;
+  if (phase !== "completed" || llmBusy || !session || !protocol.harness_supported) return;
   const operation = epoch, currentSession = session;
   llmBusy = true; controls(); $("llm-status").textContent = "Préparation de la note…";
   try {
@@ -332,6 +381,12 @@ window.addEventListener("pagehide", () => {
 controls();
 request("/api/status").then((status) => {
   models = status.models || []; demo = status.pose_mode === "synthetic_demo";
+  protocols = status.protocols?.length ? status.protocols : protocols;
+  $("protocol").replaceChildren(...protocols.map((item) => {
+    const option = document.createElement("option"); option.value = item.id; option.textContent = item.label; return option;
+  }));
+  $("protocol").value = protocols[0].id;
+  $("connection-status").textContent = status.topology?.remote_client ? "Calcul distant · caméra ici" : "Caméra ici · calcul local";
   limits = { ...limits, ...status.capture_limits };
   $("llm-model").replaceChildren(...models.map((item) => {
     const option = document.createElement("option"); option.value = item.id; option.textContent = item.label; return option;
@@ -340,5 +395,5 @@ request("/api/status").then((status) => {
   const first = models.find((item) => item.configured); if (first) $("llm-model").value = first.id;
   updateModelSelection();
   $("engine-status").textContent = demo ? "Démo · pose simulée" : "Pose réelle · expérimental";
-  serverReady = true; controls();
+  serverReady = true; updateProtocol();
 }).catch(() => { $("engine-status").textContent = "Serveur indisponible"; });

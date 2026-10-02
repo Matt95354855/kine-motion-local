@@ -90,6 +90,34 @@ class LocalHttpTests(unittest.TestCase):
         self.assertEqual(captured.exception.code, 403)
         captured.exception.close()
 
+    def test_new_protocol_flow_has_selected_landmarks_and_does_not_call_elbow_harness(self) -> None:
+        with self.opener.open(self.base + "/api/status", timeout=3) as response:
+            status = json.load(response)
+        self.assertEqual(len(status["protocols"]), 7)
+        self.assertEqual(status["topology"]["camera"], "browser_client")
+        for protocol_id, count in (("knee_flexion_active", 3), ("neck_lateral_inclination", 4), ("neck_rotation_guided", 4)):
+            session = self.post_json("/api/session/start", {"side": "right", "protocol_id": protocol_id})
+            for index in range(3):
+                request = Request(self.base + "/api/frame", data=b"\xff\xd8test", method="POST", headers={
+                    "Content-Type": "image/jpeg", "Origin": self.base,
+                    "X-Session-Id": session["session_id"], "X-Session-Token": session["token"],
+                    "X-Sequence": str(index), "X-Timestamp-Ms": str(index * 200),
+                })
+                with self.opener.open(request, timeout=3) as response:
+                    observation = json.load(response)
+                self.assertEqual(len(observation["pose"]["points"]), count)
+                self.assertEqual(observation["pose"]["protocol_id"], protocol_id)
+                if protocol_id == "neck_rotation_guided":
+                    self.assertIsNone(observation["angle_deg"])
+            finished = self.post_json("/api/session/finish", {**session, "view_confirmed": True, "camera_stable_confirmed": True})
+            self.assertEqual(finished["measurement"]["protocol_id"], protocol_id)
+            self.assertNotIn("coude", finished["draft"])
+            with self.assertRaises(HTTPError) as captured:
+                self.post_json("/api/harness/draft", session)
+            self.assertEqual(captured.exception.code, 409)
+            captured.exception.close()
+            self.post_json("/api/session/cancel", session)
+
     def test_model_selection_and_visual_consent_are_enforced(self) -> None:
         class RecordingModel:
             def __init__(self) -> None:

@@ -13,19 +13,20 @@
   <main>
     <header class="topbar">
       <a class="brand" href="/" aria-label="Kiné accueil"><span class="brand-mark">k.</span> kiné<span class="brand-light">motion</span></a>
-      <div class="badges"><span class="local-dot">Local</span><span id="engine-status" class="badge">Connexion…</span></div>
+      <div class="badges"><span id="connection-status" class="local-dot">Local</span><span id="engine-status" class="badge">Connexion…</span></div>
     </header>
     <div class="page-title"><div><p class="eyebrow">Votre espace de mouvement</p><h1>Analyse de mouvement</h1></div><span class="prototype">Prototype · sans dossier patient</span></div>
     <section class="capture-card" aria-label="Capture du mouvement">
       <div class="protocol-bar">
-        <div class="protocol-name"><span class="step-number">01</span><div><strong>Flexion du coude</strong><span>Vue de profil · bras le long du corps</span></div></div>
-        <div class="protocol-options"><label for="side" class="sr-only">Côté anatomique observé</label><select id="side"><option value="left">Coude gauche</option><option value="right">Coude droit</option></select><button id="guide-toggle" class="quiet" aria-pressed="true">Guide animé</button></div>
+        <div class="protocol-name"><span class="step-number">01</span><div><label for="protocol" class="sr-only">Mouvement observé</label><select id="protocol" aria-label="Mouvement observé"><option value="elbow_flexion_active">Coude · flexion</option></select><span id="protocol-framing">Vue de profil · épaule, coude et poignet visibles</span></div></div>
+        <div class="protocol-options"><label for="side" class="sr-only">Côté anatomique ou direction demandée</label><select id="side"><option value="left">Gauche</option><option value="right">Droite</option></select><span class="muted">Guide permanent</span></div>
       </div>
       <div id="camera-stage" class="camera-stage">
         <video id="preview" playsinline muted></video>
         <img id="evidence" alt="Image utilisée pour le résultat de cet essai" hidden>
         <canvas id="pose-overlay" aria-hidden="true"></canvas>
-        <div id="empty-state" class="empty-state"><svg viewBox="0 0 48 48" aria-hidden="true"><rect x="7" y="14" width="34" height="25" rx="7"/><path d="M16 14l3-5h10l3 5"/><circle cx="24" cy="26" r="7"/></svg><strong>Placez-vous de profil</strong><span>Ouvrez la caméra pour commencer</span></div>
+        <div id="empty-state" class="empty-state"><svg viewBox="0 0 48 48" aria-hidden="true"><rect x="7" y="14" width="34" height="25" rx="7"/><path d="M16 14l3-5h10l3 5"/><circle cx="24" cy="26" r="7"/></svg><strong id="framing-prompt">Placez-vous de profil</strong><span>Ouvrez la caméra pour commencer</span></div>
+        <div id="framing-guide" class="framing-guide" aria-hidden="true"><div class="framing-outline"></div><span id="framing-label">Épaule · coude · poignet</span></div>
         <div class="stage-top"><span id="capture-badge" class="stage-badge">Caméra inactive</span><span id="elapsed" class="stage-badge">00:00</span></div>
         <figure id="guide-panel" class="guide-panel"><figcaption><span class="guide-dot"></span> Guide du geste</figcaption><canvas id="guide-avatar" width="180" height="240" role="img" aria-label="Personnage montrant lentement la flexion puis l'extension du coude"></canvas><p id="guide-cue">Pliez doucement</p></figure>
         <div id="live-feedback" class="live-feedback" role="status" aria-live="polite">Suivez le personnage à votre rythme</div>
@@ -34,13 +35,13 @@
         <div class="source-controls"><button id="camera-start" class="secondary">Ouvrir la caméra</button><label class="file-button" for="video-file">Importer une vidéo</label><input id="video-file" type="file" accept="video/mp4,video/webm,video/quicktime"><label for="camera-device" class="sr-only">Caméra</label><select id="camera-device" aria-label="Caméra"><option value="">Caméra par défaut</option></select></div>
         <div class="trial-controls"><button id="record" disabled>Démarrer l’essai</button><button id="finish" class="secondary" disabled>Terminer</button><button id="stop" class="stop-button" disabled aria-label="Arrêt immédiat">■ Arrêter</button></div>
       </div>
-      <div class="capture-bottom"><div class="checks"><label><input id="view-confirmed" type="checkbox"> Vue de profil</label><label><input id="stable-confirmed" type="checkbox"> Caméra stable</label></div><span id="frame-status" class="muted">Aucune image analysée</span></div>
+      <div class="capture-bottom"><div class="checks"><label><input id="view-confirmed" type="checkbox"> <span id="view-label">Vue de profil</span></label><label><input id="stable-confirmed" type="checkbox"> Caméra stable</label></div><span id="frame-status" class="muted">Aucune image analysée</span></div>
       <p id="capture-details" class="capture-message" role="status" aria-live="polite">Vidéo uniquement · aucun enregistrement sur disque</p>
     </section>
     <section id="results" class="results-card" aria-labelledby="result-title" hidden>
       <div class="result-header"><div><p class="eyebrow">Votre essai</p><h2 id="result-title">Résultat à vérifier</h2></div><span id="measurement-status" class="badge"></span></div>
-      <div class="metrics"><div class="metric primary-metric"><span>Flexion apparente</span><strong id="angle-result">—</strong></div><div class="metric"><span>Durée observée</span><strong id="duration-result">—</strong></div><div class="metric"><span>Images exploitables</span><strong id="coverage-result">—</strong></div></div>
-      <div class="chart-wrap"><canvas id="angle-chart" height="160" role="img" aria-label="Évolution de l'angle apparent du coude dans le temps"></canvas><div class="chart-caption"><span>Angle apparent au fil du mouvement</span><span id="evidence-label"></span></div></div>
+      <div class="metrics"><div class="metric primary-metric"><span id="metric-label">Flexion apparente</span><strong id="angle-result">—</strong></div><div class="metric"><span>Durée observée</span><strong id="duration-result">—</strong></div><div class="metric"><span>Images exploitables</span><strong id="coverage-result">—</strong></div></div>
+      <div id="chart-wrap" class="chart-wrap"><canvas id="angle-chart" height="160" role="img" aria-label="Évolution de la projection angulaire dans le temps"></canvas><div class="chart-caption"><span>Angle apparent au fil du mouvement</span><span id="evidence-label"></span></div></div>
       <div class="result-actions"><button id="export-report" class="secondary" disabled>Exporter le brouillon</button><button id="export-json" class="quiet" disabled>Données du test</button><button id="restart" class="quiet">Nouvel essai</button></div>
       <details class="details"><summary>Compte rendu et limites</summary><pre id="draft"></pre></details>
     </section>
@@ -48,7 +49,7 @@
       <summary><span>Assistant local</span><span class="muted">GPT‑OSS / Qwen 3.6</span></summary>
       <div class="assistant-content"><div class="assistant-actions"><label for="llm-model" class="sr-only">Modèle local</label><select id="llm-model" disabled><option value="gpt_oss">GPT-OSS</option><option value="qwen36">Qwen 3.6</option></select><button id="check-model" class="secondary" disabled>Vérifier</button><button id="llm-draft" disabled>Préparer une note</button></div><p id="model-status" class="muted">Chargement…</p><label class="vision-option"><input id="include-image" type="checkbox" disabled> Joindre l’image de preuve</label><p id="llm-status" class="muted" aria-live="polite"></p><pre id="llm-note"></pre></div>
     </details>
-    <footer>Mesures expérimentales · revue professionnelle requise <span>Le guide illustre le geste ; il ne prescrit pas un programme.</span></footer>
+    <footer>Mesures expérimentales · revue professionnelle requise <span>Guide illustratif, pas une prescription. Arrêtez en cas de douleur ou de gêne.</span></footer>
   </main>
 </body>
 </html>

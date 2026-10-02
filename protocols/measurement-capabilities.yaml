@@ -17,6 +17,26 @@ items:
     source: algorithm
     conditions: [visible_landmarks, defined_camera_view, near_measurement_plane, complete_protocol]
     display_label: Angle apparent du genou dans ce protocole
+  - id: apparent_shoulder_elevation
+    category: estimable_under_conditions
+    source: algorithm
+    conditions: [visible_landmarks, defined_camera_view, near_measurement_plane, experimental_protocol]
+    display_label: Élévation projetée du bras, non validée
+  - id: apparent_hip_flexion
+    category: estimable_under_conditions
+    source: algorithm
+    conditions: [visible_landmarks, defined_camera_view, near_measurement_plane, experimental_protocol]
+    display_label: Flexion projetée tronc-cuisse, non validée
+  - id: head_shoulder_axis_proxy
+    category: estimable_under_conditions
+    source: algorithm
+    conditions: [both_ears_visible, both_shoulders_visible, frontal_view, experimental_protocol]
+    display_label: Orientation tête/épaules, pas une amplitude cervicale
+  - id: cervical_rotation_angle
+    category: not_covered
+    source: none
+    conditions: []
+    display_label: Rotation du cou guidée mais non mesurée en 2D
   - id: observed_active_excursion
     category: estimable_under_conditions
     source: algorithm
