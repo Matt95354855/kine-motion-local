@@ -44,11 +44,16 @@ Effectuer l'installation **avant** une séance, avec Internet. Le profil testé 
 
 ### Windows — PowerShell
 
+Python 3.11.14 n'a pas d'installateur Windows fourni par Python.org ; les versions 3.11 récentes sont publiées sous forme de sources. Pour conserver la même version sans revenir à un ancien Python, utiliser un petit environnement d'installation isolé et le runtime géré par uv. Un Python déjà disponible via `py` sert seulement à préparer cet environnement. [Source Python](https://www.python.org/downloads/release/python-31114/), [installation uv](https://docs.astral.sh/uv/getting-started/installation/).
+
 ```powershell
 git clone --branch camera-guidance-local https://github.com/Matt95354855/kine-motion-local.git
 cd kine-motion-local
-py -3.11 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install --require-hashes -r infra/requirements-pose.lock
+py -m venv .setup
+.\.setup\Scripts\python.exe -m pip install uv==0.9.8
+.\.setup\Scripts\python.exe -m uv python install 3.11.14
+.\.setup\Scripts\python.exe -m uv venv --python 3.11.14 .venv
+.\.setup\Scripts\python.exe -m uv pip sync --python .\.venv\Scripts\python.exe --require-hashes infra/requirements-pose.lock
 .\.venv\Scripts\python.exe -m scripts.prepare_pose --download
 .\.venv\Scripts\python.exe -m scripts.check_install --pose-smoke
 .\.venv\Scripts\python.exe -m scripts.start_local --experimental-pose
@@ -67,6 +72,8 @@ python3.11 -m venv .venv
 ```
 
 Si le dépôt est déjà cloné, récupérer puis sélectionner cette branche en préservant les modifications locales. Les poids de pose sont téléchargés uniquement par la commande explicite `--download` ; ni le lanceur ni une séance ne téléchargent de modèle. Un fichier dont le hash diffère n'est pas remplacé silencieusement.
+
+Si Python 3.11.14 n'est pas déjà installé sur Linux/macOS, uv 0.9.8 peut également préparer ce runtime puis `.venv` avec `uv python install 3.11.14` et `uv venv --python 3.11.14 .venv`. Ne pas remplacer un environnement existant qui contient les serveurs LLM ; la pose reste dans le `.venv` de ce dépôt.
 
 La RTX n'est pas nécessaire à la pose dans ce profil. Le diagnostic relève les informations NVIDIA si `nvidia-smi` est disponible, mais ne lance ni test CUDA ni LLM. **Windows/Linux et la RTX A4500 restent à vérifier sur ton matériel.** Ne pas confondre installation réussie et précision clinique.
 

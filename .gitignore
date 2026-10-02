@@ -29,6 +29,7 @@ tmp/
 *.task
 models/
 .cache/
+.setup/
 
 # Artefacts de développement.
 __pycache__/
