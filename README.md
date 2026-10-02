@@ -104,7 +104,7 @@ python -m scripts.benchmark_pose --frames 30
 
 Le microbenchmark utilise **des images vides** : ses chiffres ne représentent ni le suivi d'une personne ni les performances GPU/LLM. Le diagnostic affiche uniquement des informations techniques locales ; aucune photo, aucune identité, aucun secret.
 
-Au 2 octobre 2026 : **26 tests Python et 11 tests JavaScript réussis** sur le Mac Intel de développement ; interface inspectée dans le navigateur intégré ; modèle réel initialisé et absence de pose vérifiée sur image noire. La CI synthétique Linux/Windows est ajoutée, sans poids ni GPU ; son résultat distant est à consulter après publication. Les tests physiques webcam, les mouvements réels, le mode hors réseau et la RTX ne constituent pas des validations acquises.
+Au 2 octobre 2026 : **26 tests Python et 11 tests JavaScript réussis** sur le Mac Intel de développement, puis [en CI sur Linux et Windows](https://github.com/Matt95354855/kine-motion-local/actions/runs/36998467450), sans poids ni GPU. Interface inspectée dans le navigateur intégré ; modèle réel initialisé et absence de pose vérifiée sur image noire sur Mac. La CI utilise des systèmes identifiés et des actions épinglées par commit. Les tests physiques webcam, les mouvements réels, le mode hors réseau et la RTX ne constituent pas des validations acquises.
 
 ## Suite du projet
 
