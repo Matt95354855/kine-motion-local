@@ -7,7 +7,7 @@ from threading import Event, Thread
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
-from packages.harness.control import InferenceControl
+from packages.harness.control import InferenceControl, InferenceDeadlineExceeded
 
 
 _MAX_RESPONSE_BYTES = 256_000
@@ -112,7 +112,9 @@ class LocalLLMClient:
         """
         control.check()
         payload = self._payload(messages, tools)
-        timeout = min(self.timeout_seconds, control.remaining_seconds())
+        remaining_budget = control.remaining_seconds()
+        budget_limits_socket = remaining_budget <= self.timeout_seconds
+        timeout = min(self.timeout_seconds, remaining_budget)
         connection = HTTPConnection(self._host, self._port, timeout=timeout)
         family = socket.AF_INET6 if self._host == "::1" else socket.AF_INET
         transport = socket.socket(family, socket.SOCK_STREAM)
@@ -171,6 +173,15 @@ class LocalLLMClient:
             message = _message_from_body(bytes(body))
             control.check()
             return message
+        except socket.timeout:
+            # L'arrondi des timers système peut expirer juste avant l'horloge
+            # monotone. Ne pas prolonger l'attente : si le budget global était
+            # sa borne, exposer cette cause. Une annulation reste prioritaire et
+            # un délai client plus court reste un timeout transport distinct.
+            control.check()
+            if budget_limits_socket:
+                raise InferenceDeadlineExceeded("Budget d'inférence dépassé") from None
+            raise
         except HTTPException:
             control.check()
             raise OSError("Réponse HTTP du serveur LLM invalide") from None

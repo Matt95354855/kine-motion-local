@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import math
+import socket
 from threading import Event, Thread, Timer, enumerate as running_threads
 from time import monotonic
 import unittest
@@ -140,6 +141,58 @@ class ControlTests(unittest.TestCase):
                 )
         transport.close.assert_called()
         transport.connect.assert_not_called()
+
+    def test_budget_limited_socket_timeout_is_deadline_even_before_clock_boundary(self):
+        clock = FakeClock()
+        control = InferenceControl(0.08, clock=clock)
+        transport, connection = Mock(), Mock()
+        connection.getresponse.side_effect = socket.timeout("timed out")
+        with patch("packages.harness.local_llm.socket.socket", return_value=transport), \
+             patch("packages.harness.local_llm.HTTPConnection", return_value=connection):
+            with self.assertRaises(InferenceDeadlineExceeded) as error:
+                LocalLLMClient("http://127.0.0.1:8081", "gpt-oss").complete_controlled(
+                    [], [], control
+                )
+        self.assertEqual(error.exception.code, "inference_deadline_exceeded")
+        self.assertEqual(clock.now, 0.0, "Le test simule une expiration OS avant la borne monotone")
+        transport.settimeout.assert_called_once_with(0.08)
+        transport.close.assert_called()
+        connection.request.assert_called_once()
+
+    def test_shorter_client_socket_timeout_does_not_claim_global_deadline(self):
+        clock = FakeClock()
+        control = InferenceControl(10.0, clock=clock)
+        transport, connection = Mock(), Mock()
+        timeout_error = socket.timeout("timed out")
+        connection.getresponse.side_effect = timeout_error
+        with patch("packages.harness.local_llm.socket.socket", return_value=transport), \
+             patch("packages.harness.local_llm.HTTPConnection", return_value=connection):
+            with self.assertRaises(socket.timeout) as error:
+                LocalLLMClient("http://127.0.0.1:8081", "gpt-oss", timeout_seconds=0.08).complete_controlled(
+                    [], [], control
+                )
+        self.assertIs(error.exception, timeout_error)
+        self.assertNotIsInstance(error.exception, InferenceDeadlineExceeded)
+        transport.settimeout.assert_called_once_with(0.08)
+        transport.close.assert_called()
+        connection.request.assert_called_once()
+
+    def test_cancellation_takes_priority_over_budget_limited_socket_timeout(self):
+        control = InferenceControl(0.08, clock=FakeClock())
+        transport, connection = Mock(), Mock()
+
+        def cancelled_timeout():
+            control.cancel()
+            raise socket.timeout("timed out")
+
+        connection.getresponse.side_effect = cancelled_timeout
+        with patch("packages.harness.local_llm.socket.socket", return_value=transport), \
+             patch("packages.harness.local_llm.HTTPConnection", return_value=connection):
+            with self.assertRaises(InferenceCancelled):
+                LocalLLMClient("http://127.0.0.1:8081", "gpt-oss").complete_controlled(
+                    [], [], control
+                )
+        transport.close.assert_called()
 
 
 @contextmanager
