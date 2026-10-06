@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 from packages.contracts.models import MeasurementStatus
 from packages.harness.demo import synthetic_trial
+from packages.harness.final_note import FACT_TEXT, REVIEW_TEXT, supported_fact_codes
 from packages.harness.local_llm import LocalLLMClient
 from packages.harness.runner import run_harness
 from packages.harness.tools import ToolContext, ToolRegistry
@@ -43,9 +44,10 @@ class FakeToolCallingLLM:
             }
         assert messages[-1]["role"] == "tool"
         assert "quality_reasons" in json.loads(messages[-1]["content"])
+        observation = json.loads(messages[-1]["content"])
         return {"content": json.dumps({
             "measurement_ref": self.measurement_ref,
-            "text": "Vue à vérifier par le professionnel.",
+            "fact_codes": observation["supported_fact_codes"],
             "requires_professional_review": True,
         })}
 
@@ -97,7 +99,9 @@ class CaptureAndHarnessTests(unittest.TestCase):
         model = FakeToolCallingLLM(measurement.measurement_id)
         result = run_harness(context, model)
         self.assertEqual(result.tool_names, ("get_capture_observation",))
-        self.assertEqual(result.proposed_note, "Vue à vérifier par le professionnel.")
+        self.assertEqual(result.proposed_note, " ".join([
+            *(FACT_TEXT[code] for code in supported_fact_codes(measurement)), REVIEW_TEXT,
+        ]))
         self.assertNotIn(result.proposed_note, result.deterministic_draft)
         self.assertIsNone(result.fallback_reason)
 
@@ -176,7 +180,7 @@ class CaptureAndHarnessTests(unittest.TestCase):
                 assert image.startswith("data:image/jpeg;base64,")
                 return {"content": json.dumps({
                     "measurement_ref": measurement.measurement_id,
-                    "text": "La vue demande une vérification humaine.",
+                    "fact_codes": list(supported_fact_codes(measurement)),
                     "requires_professional_review": True,
                 })}
 

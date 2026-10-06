@@ -11,18 +11,21 @@ function deferred() {
   return { promise, resolve };
 }
 function environment(customFetch) {
-  const elements = new Map(), events = new Map(), requests = [], timers = new Map();
+  const elements = new Map(), events = new Map(), requests = [], timers = new Map(), timerDelays = new Map();
+  const beacons = [];
   let nextTimer = 0, nextSession = 0;
   const frame = { sequence: 0, angle_deg: 90, quality_reason: null, pose: null };
   class Element {
     constructor(id) {
       this.id = id; this.disabled = false; this.hidden = false; this.value = id === 'side' ? 'left' : '';
-      this.textContent = ''; this.checked = false; this.readyState = 2; this.videoWidth = 640;
+      this.textWrites = 0; this.textContent = ''; this.checked = false; this.readyState = 2; this.videoWidth = 640;
       this.videoHeight = 480; this.currentTime = 0; this.duration = 4; this.files = [];
       this.handlers = new Map();
       this.dataset = {};
       this.classList = { add() {}, remove() {}, toggle() {} };
     }
+    set textContent(value) { this.content = value; this.textWrites += 1; }
+    get textContent() { return this.content; }
     addEventListener(name, fn) { this.handlers.set(name, fn); }
     removeEventListener(name) { this.handlers.delete(name); }
     getContext() { return { drawImage() {} }; }
@@ -52,22 +55,22 @@ function environment(customFetch) {
     document: { getElementById: get, createElement: () => new Element(), hidden: false,
       addEventListener: (name, fn) => events.set(name, fn) },
     window: { addEventListener: (name, fn) => events.set(name, fn) },
-    navigator: { sendBeacon() {} }, performance: { now: () => 1000 },
+    navigator: { sendBeacon: (path, body) => { beacons.push({ path, body }); return true; } }, performance: { now: () => 1000 },
     KineCapture: { CaptureClock, landmarkPosition }, KineGuide: { drawPose() {}, drawChart() {}, setSide() {}, setProtocol() {} },
     ResizeObserver: class { observe() {} }, AbortController, Blob, Uint8Array, atob,
     URL: { createObjectURL: () => 'blob:test', revokeObjectURL() {} },
-    setTimeout: (fn) => { const id = ++nextTimer; timers.set(id, fn); return id; },
+    setTimeout: (fn, delay) => { const id = ++nextTimer; timers.set(id, fn); timerDelays.set(id, delay); return id; },
     clearTimeout: (id) => timers.delete(id), setInterval: (fn) => { const id = ++nextTimer; timers.set(id, fn); return id; },
     clearInterval: (id) => timers.delete(id),
     fetch: async (path, options = {}) => {
       requests.push({ path, options });
       const body = await (customFetch?.(path, options) ?? defaultFetch(path, options));
-      return { ok: true, json: async () => body };
+      return { ok: !body.__httpStatus, status: body.__httpStatus || 200, json: async () => body };
     },
   };
   vm.createContext(sandbox);
   vm.runInContext(fs.readFileSync(require.resolve('../apps/web/app.js'), 'utf8'), sandbox);
-  return { get, sandbox, requests, timers, run: (code) => vm.runInContext(code, sandbox) };
+  return { get, sandbox, requests, timers, timerDelays, events, beacons, run: (code) => vm.runInContext(code, sandbox) };
 }
 const settle = () => new Promise((resolve) => setImmediate(resolve));
 async function prepareFile(env) {
@@ -200,4 +203,398 @@ test('pose overlay expires even while the next network request is pending', asyn
   assert.equal(env.run('latestPose'), null);
   assert.ok(env.get('live-feedback').textContent.includes('expirés'));
   await env.run('cancelSession()');
+});
+
+const liveLimits = { window_ms: 5000, max_samples: 25, max_images: 2, poll_interval_ms: 1000,
+  inference_interval_ms: 3000, result_ttl_ms: 10000 };
+function liveEnvironment(customFetch) {
+  return environment((path, options) => {
+    if (path === '/api/status') return { pose_mode: 'mediapipe_experimental', live_harness: liveLimits, models: [
+      { id: 'gpt_oss', label: 'GPT-OSS', configured: true, image_enabled: false },
+      { id: 'qwen36', label: 'Qwen 3.6', configured: true, image_enabled: true },
+    ] };
+    if (path === '/api/models/check') return { model_id: JSON.parse(options.body).model_id, state: 'ready' };
+    if (path === '/api/harness/live/poll') return customFetch?.(path, options) ?? {
+      state: 'warming_up', window: null, result: null, result_age_ms: null,
+    };
+    return customFetch?.(path, options);
+  });
+}
+function liveObservation(text = 'Le mouvement reste à vérifier.') {
+  return { state: 'ready', window: { window_ref: 'window-1', start_timestamp_ms: 0, end_timestamp_ms: 600,
+    sample_count: 4, image_count: 0 }, result_age_ms: 50,
+    result: { window_ref: 'window-1', start_timestamp_ms: 0, end_timestamp_ms: 600, observation_code: 'pose_visible',
+      text, tool_names: [], fallback_reason: null, image_count: 0, requires_professional_review: true, provisional: true } };
+}
+async function enableLiveAssistant(env) {
+  await env.get('check-model').click();
+  assert.equal(env.get('live-assistant').disabled, false);
+  env.get('live-assistant').checked = true;
+  await env.get('live-assistant').handlers.get('change')();
+}
+test('live assistant is opt-in and requires a configured, advertised model alias', async () => {
+  const env = liveEnvironment();
+  await prepareFile(env);
+  assert.equal(env.get('live-assistant').checked, false);
+  assert.equal(env.get('live-assistant').disabled, true);
+  await env.get('check-model').click();
+  assert.equal(env.get('live-assistant').disabled, false);
+  assert.ok(env.get('model-status').textContent.includes('non validés'));
+  await env.run('startTrial()');
+  assert.equal(env.requests.filter((r) => r.path === '/api/harness/live/poll').length, 0);
+  await env.run('cancelSession()');
+});
+test('a pending live poll neither blocks capture nor starts concurrent polls', async () => {
+  const response = deferred();
+  const env = liveEnvironment((path) => path === '/api/harness/live/poll' ? response.promise : undefined);
+  await prepareFile(env); await enableLiveAssistant(env);
+  assert.equal(env.requests.filter((r) => r.path === '/api/harness/live/poll').length, 0);
+  await env.run('startTrial()');
+  env.get('preview').currentTime = 0.2;
+  await env.run('sampleFrame()');
+  await env.run('pollLiveAssistant()'); await env.run('pollLiveAssistant()');
+  assert.equal(env.requests.filter((r) => r.path === '/api/frame').length, 2);
+  assert.equal(env.requests.filter((r) => r.path === '/api/harness/live/poll').length, 1);
+  assert.equal(env.run('phase'), 'recording');
+  await env.run('cancelSession()'); response.resolve(liveObservation()); await settle();
+});
+test('live observation names its analysed interval and is never added to final exports', async () => {
+  const env = liveEnvironment((path) => path === '/api/harness/live/poll' ? liveObservation('LIVE-ONLY OBSERVATION') : undefined);
+  await prepareFile(env); await enableLiveAssistant(env); await env.run('startTrial()'); await settle();
+  assert.equal(env.get('live-assistant-return').hidden, false);
+  assert.equal(env.get('live-assistant-text').textContent, 'Repères visibles');
+  assert.ok(env.get('live-assistant-window').textContent.includes('0.0–0.6 s'));
+  assert.equal(env.get('live-assistant-freshness').textContent, 'Âge 1 s');
+  assert.ok(env.get('live-assistant-detail').textContent.includes('Vue et stabilité à vérifier'));
+  assert.equal(env.get('llm-note').textContent, '');
+  await env.run('finishSession(false)');
+  assert.equal(env.get('live-assistant-return').hidden, true);
+  assert.equal(env.get('live-assistant').checked, false);
+  const exported = env.run('JSON.stringify(resultDocument)');
+  assert.ok(!exported.includes('LIVE-ONLY OBSERVATION'));
+  assert.ok(!exported.includes('window-1'));
+  assert.ok(!env.get('draft').textContent.includes('LIVE-ONLY OBSERVATION'));
+  await env.run('cancelSession()');
+});
+test('expired live observations disappear even with a subsequent poll still pending', async () => {
+  let calls = 0;
+  const response = deferred();
+  const env = liveEnvironment((path) => path === '/api/harness/live/poll' ? ++calls === 1 ? liveObservation() : response.promise : undefined);
+  await prepareFile(env); await enableLiveAssistant(env); await env.run('startTrial()'); await settle();
+  const nextPoll = env.run('pollLiveAssistant()');
+  const expiry = env.run('liveResultExpiryTimer');
+  env.timers.get(expiry)();
+  assert.equal(env.get('live-assistant-return').hidden, true);
+  assert.equal(env.get('live-assistant-text').textContent, '');
+  assert.ok(env.get('live-assistant-status').textContent.includes('expirée'));
+  await env.run('cancelSession()'); response.resolve(liveObservation()); await nextPoll;
+});
+test('warming up with too few recent samples immediately hides the previous observation', async (t) => {
+  for (const sampleCount of [0, 2]) await t.test(`recent sample count ${sampleCount}`, async () => {
+    let calls = 0;
+    const env = liveEnvironment((path) => path === '/api/harness/live/poll' ? ++calls === 1 ? liveObservation() : {
+      state: 'warming_up', window: { window_ref: 'new-window', sample_count: sampleCount },
+      result: null, result_age_ms: 500,
+    } : undefined);
+    await prepareFile(env); await enableLiveAssistant(env); await env.run('startTrial()'); await settle();
+    assert.equal(env.get('live-assistant-return').hidden, false);
+    await env.run('pollLiveAssistant()');
+    assert.equal(env.get('live-assistant-return').hidden, true);
+    assert.equal(env.get('live-assistant-text').textContent, '');
+    assert.equal(env.run('liveResultExpiryTimer'), null);
+    assert.equal(env.run('phase'), 'recording');
+    await env.run('cancelSession()');
+  });
+});
+test('failed polling leaves capture active and does not cancel the session', async () => {
+  const env = liveEnvironment((path) => path === '/api/harness/live/poll' ? Promise.reject(new Error('LLM absent')) : undefined);
+  await prepareFile(env); await enableLiveAssistant(env); await env.run('startTrial()'); await settle();
+  assert.equal(env.run('phase'), 'recording');
+  assert.ok(env.get('live-assistant-status').textContent.includes('caméra maintenue'));
+  assert.equal(env.requests.filter((r) => r.path === '/api/session/cancel').length, 0);
+  env.get('preview').currentTime = 0.2; await env.run('sampleFrame()');
+  assert.equal(env.requests.filter((r) => r.path === '/api/frame').length, 2);
+  await env.run('cancelSession()');
+});
+test('unchecking live assistant aborts polling, revokes the server window and ignores late replies', async () => {
+  const response = deferred();
+  const env = liveEnvironment((path) => path === '/api/harness/live/poll' ? response.promise : undefined);
+  await prepareFile(env); await enableLiveAssistant(env); await env.run('startTrial()');
+  const poll = env.requests.find((r) => r.path === '/api/harness/live/poll');
+  env.get('live-assistant').checked = false;
+  await env.get('live-assistant').handlers.get('change')();
+  assert.equal(poll.options.signal.aborted, true);
+  assert.equal(env.requests.filter((r) => r.path === '/api/harness/live/stop').length, 1);
+  const stop = env.requests.find((r) => r.path === '/api/harness/live/stop');
+  assert.ok(JSON.parse(stop.options.body).control_version > JSON.parse(poll.options.body).control_version);
+  response.resolve(liveObservation('LATE')); await settle();
+  assert.equal(env.get('live-assistant-return').hidden, true);
+  assert.equal(env.get('live-assistant-text').textContent, '');
+  assert.equal(env.run('phase'), 'recording');
+  await env.run('cancelSession()');
+});
+test('changing model suspends live assistant until explicit opt-in and rejects old replies', async () => {
+  const response = deferred();
+  const env = liveEnvironment((path) => path === '/api/harness/live/poll' ? response.promise : undefined);
+  await prepareFile(env); await enableLiveAssistant(env); await env.run('startTrial()');
+  env.get('llm-model').value = 'qwen36'; await env.get('llm-model').handlers.get('change')();
+  assert.equal(env.get('live-assistant').checked, false);
+  assert.equal(env.get('live-assistant').disabled, true);
+  response.resolve(liveObservation('OLD MODEL')); await settle();
+  assert.equal(env.get('live-assistant-return').hidden, true);
+  await env.get('check-model').click();
+  assert.equal(env.get('live-assistant').disabled, false);
+  assert.equal(env.get('live-assistant').checked, false);
+  await env.run('cancelSession()');
+});
+test('recent images require both server capability and explicit consent; consent changes suspend polling', async () => {
+  const env = liveEnvironment();
+  await prepareFile(env); await enableLiveAssistant(env);
+  env.get('include-image').checked = true; // Forced state cannot bypass GPT-OSS text-only capability.
+  await env.run('startTrial()'); await settle();
+  const first = env.requests.find((r) => r.path === '/api/harness/live/poll');
+  assert.equal(JSON.parse(first.options.body).include_image, false);
+  env.get('llm-model').value = 'qwen36'; await env.get('llm-model').handlers.get('change')();
+  env.get('include-image').checked = true; await env.get('include-image').handlers.get('change')();
+  assert.equal(env.get('live-assistant').checked, false);
+  await enableLiveAssistant(env); await settle();
+  const polls = env.requests.filter((r) => r.path === '/api/harness/live/poll');
+  assert.equal(JSON.parse(polls.at(-1).options.body).include_image, true);
+  env.get('include-image').checked = false; await env.get('include-image').handlers.get('change')();
+  assert.equal(env.get('live-assistant').checked, false);
+  assert.equal(env.get('live-assistant-return').hidden, true);
+  assert.equal(env.run('phase'), 'recording');
+  await env.run('cancelSession()');
+});
+test('finish, cancellation and pagehide discard late live observations', async (t) => {
+  for (const action of ['finish', 'cancel', 'pagehide']) await t.test(action, async () => {
+    const response = deferred();
+    const env = liveEnvironment((path) => path === '/api/harness/live/poll' ? response.promise : undefined);
+    await prepareFile(env); await enableLiveAssistant(env); await env.run('startTrial()');
+    if (action === 'finish') await env.run('finishSession(false)');
+    if (action === 'cancel') await env.run('cancelSession()');
+    if (action === 'pagehide') env.events.get('pagehide')();
+    response.resolve(liveObservation('LATE AFTER EXIT')); await settle();
+    assert.equal(env.get('live-assistant-return').hidden, true);
+    assert.equal(env.get('live-assistant-text').textContent, '');
+    assert.equal(env.get('live-assistant').checked, false);
+    if (action === 'pagehide') {
+      const stopBeacon = env.beacons.find((entry) => entry.path === '/api/harness/live/stop');
+      assert.ok(stopBeacon);
+      const document = JSON.parse(await stopBeacon.body.text());
+      const poll = env.requests.find((r) => r.path === '/api/harness/live/poll');
+      assert.ok(document.control_version > JSON.parse(poll.options.body).control_version);
+    }
+    await env.run('cancelSession()');
+  });
+});
+test('pagehide resets cached capture state without automatic restart, duplicate stop fetches or late poses', async () => {
+  const frame = deferred(), observation = deferred();
+  let frames = 0;
+  const env = liveEnvironment((path) => {
+    if (path === '/api/harness/live/poll') return observation.promise;
+    if (path === '/api/frame') return ++frames === 1 ? {
+      sequence: 0, angle_deg: 90, quality_reason: null, pose: { points: [] },
+    } : frame.promise;
+    return undefined;
+  });
+  await prepareFile(env); await enableLiveAssistant(env); await env.run('startTrial()');
+  assert.notEqual(env.run('latestPose'), null);
+  env.get('preview').currentTime = 0.2;
+  const sampling = env.run('sampleFrame()'); await settle();
+  const oldEpoch = env.run('epoch');
+  env.get('include-image').checked = true;
+  env.events.get('pagehide')();
+  assert.equal(env.run('phase'), 'idle');
+  assert.ok(env.run('epoch') > oldEpoch);
+  assert.equal(env.run('session'), null);
+  assert.equal(env.run('source'), null);
+  assert.equal(env.run('latestPose'), null);
+  assert.equal(env.run('resultDocument'), null);
+  assert.equal(env.run('pending'), null);
+  assert.equal(env.run('livePending'), null);
+  assert.equal(env.run('controllers.size'), 0);
+  assert.equal(env.run('timer'), null);
+  assert.equal(env.run('expiryTimer'), null);
+  assert.equal(env.run('poseExpiryTimer'), null);
+  assert.equal(env.get('preview').paused, true);
+  assert.equal(env.get('record').disabled, true);
+  assert.equal(env.get('camera-start').disabled, false);
+  assert.equal(env.get('include-image').checked, false);
+  assert.equal(env.get('capture-badge').textContent, 'Caméra inactive');
+  assert.equal(env.get('frame-status').textContent, 'Aucune image analysée');
+  assert.equal(env.beacons.filter((entry) => entry.path === '/api/harness/live/stop').length, 1);
+  assert.equal(env.beacons.filter((entry) => entry.path === '/api/session/cancel').length, 1);
+  assert.equal(env.requests.filter((r) => r.path === '/api/harness/live/stop').length, 0);
+  assert.equal(env.requests.filter((r) => r.path === '/api/session/cancel').length, 0);
+  frame.resolve({ sequence: 1, angle_deg: 120, quality_reason: null, pose: { points: ['OLD'] } });
+  observation.resolve(liveObservation('OLD AFTER BFCache'));
+  await sampling; await settle();
+  assert.equal(env.run('latestPose'), null);
+  assert.equal(env.get('live-assistant-return').hidden, true);
+  assert.equal(env.get('frame-status').textContent, 'Aucune image analysée');
+  await env.run('startTrial()'); await env.run('sampleFrame()');
+  assert.equal(env.requests.filter((r) => r.path === '/api/session/start').length, 1);
+  assert.equal(env.requests.filter((r) => r.path === '/api/frame').length, 2);
+  assert.ok(env.get('live-assistant').title.includes('JPEG récents purgés à la désactivation'));
+  assert.ok(env.get('live-assistant').title.includes('au plus 5 s'));
+});
+
+test('camera overlay uses only short controlled technical labels, never model prose', async (t) => {
+  const labels = { awaiting_frames: 'En attente', pose_visible: 'Repères visibles', tracking_lost: 'Suivi perdu',
+    tracking_partial: 'Suivi partiel', guide_only: 'Guide seul' };
+  for (const [code, label] of Object.entries(labels)) await t.test(code, async () => {
+    const env = liveEnvironment((path) => {
+      if (path !== '/api/harness/live/poll') return undefined;
+      const response = liveObservation('Diagnostic confirmé : tendinite. Faites cent répétitions. <script>bad()</script>');
+      response.result.observation_code = code;
+      return response;
+    });
+    await prepareFile(env); await enableLiveAssistant(env); await env.run('startTrial()'); await settle();
+    assert.equal(env.get('live-assistant-text').textContent, label);
+    assert.ok(env.get('live-assistant-detail').textContent.includes('observation provisoire'));
+    for (const id of ['live-assistant-text', 'live-assistant-detail', 'live-assistant-announcement']) {
+      assert.ok(!env.get(id).textContent.includes('Diagnostic'));
+      assert.ok(!env.get(id).textContent.includes('<script>'));
+    }
+    assert.equal(env.get('guide-panel').hidden, false);
+    await env.run('cancelSession()');
+  });
+});
+test('unknown and inherited observation codes cannot become camera feedback', async (t) => {
+  for (const code of ['normal_range', '__proto__', 'constructor']) await t.test(code, async () => {
+    const env = liveEnvironment((path) => {
+      if (path !== '/api/harness/live/poll') return undefined;
+      const response = liveObservation('Amplitude normale'); response.result.observation_code = code; return response;
+    });
+    await prepareFile(env); await enableLiveAssistant(env); await env.run('startTrial()'); await settle();
+    assert.equal(env.get('live-assistant-return').hidden, true);
+    assert.equal(env.get('live-assistant-text').textContent, '');
+    assert.equal(env.get('live-assistant-detail').textContent, '');
+    assert.equal(env.run('phase'), 'recording');
+    await env.run('cancelSession()');
+  });
+});
+test('polling the same window does not rewrite or repeatedly announce its observation', async () => {
+  let age = 50;
+  const env = liveEnvironment((path) => {
+    if (path !== '/api/harness/live/poll') return undefined;
+    const response = liveObservation(); response.result_age_ms = age; response.analysis_state = 'running'; return response;
+  });
+  await prepareFile(env); await enableLiveAssistant(env); await env.run('startTrial()'); await settle();
+  const textWrites = env.get('live-assistant-text').textWrites;
+  const announcements = env.get('live-assistant-announcement').textWrites;
+  const stateWrites = env.get('live-assistant-state').textWrites;
+  age = 1500;
+  await env.run('pollLiveAssistant()'); await env.run('pollLiveAssistant()');
+  assert.equal(env.get('live-assistant-text').textWrites, textWrites);
+  assert.equal(env.get('live-assistant-announcement').textWrites, announcements);
+  assert.equal(env.get('live-assistant-state').textWrites, stateWrites);
+  assert.equal(env.get('live-assistant-freshness').textContent, 'Âge 2 s');
+  assert.equal(env.get('live-assistant-state').textContent, 'Analyse en cours');
+  await env.run('cancelSession()');
+});
+test('freshness keeps aging during a pending poll without repeatedly announcing the window', async () => {
+  let calls = 0, now = 1000;
+  const waiting = deferred();
+  const env = liveEnvironment((path) => path === '/api/harness/live/poll' ? ++calls === 1 ? liveObservation() : waiting.promise : undefined);
+  env.sandbox.performance.now = () => now;
+  await prepareFile(env); await enableLiveAssistant(env); await env.run('startTrial()'); await settle();
+  const pending = env.run('pollLiveAssistant()');
+  const ageTimer = env.run('liveFreshnessTimer');
+  const announcements = env.get('live-assistant-announcement').textWrites;
+  now += 2000; env.timers.get(ageTimer)();
+  assert.equal(env.get('live-assistant-freshness').textContent, 'Âge 3 s');
+  assert.equal(env.get('live-assistant-announcement').textWrites, announcements);
+  env.timers.get(env.run('liveResultExpiryTimer'))();
+  assert.equal(env.run('liveFreshnessTimer'), null);
+  assert.equal(env.get('live-assistant-return').hidden, true);
+  await env.run('cancelSession()'); waiting.resolve(liveObservation()); await pending;
+});
+test('busy state is explicit, retains only the still-current observation and never queues capture', async () => {
+  let calls = 0;
+  const env = liveEnvironment((path) => path === '/api/harness/live/poll' ? ++calls === 1 ? liveObservation() : {
+    state: 'busy', analysis_state: 'busy', busy_reason: 'analysis_busy', budget_remaining_ms: null, result: null,
+  } : undefined);
+  await prepareFile(env); await enableLiveAssistant(env); await env.run('startTrial()'); await settle();
+  const expiry = env.run('liveResultExpiryTimer');
+  await env.run('pollLiveAssistant()');
+  assert.equal(env.get('live-assistant-state').textContent, 'Assistant occupé');
+  assert.equal(env.get('live-assistant-return').hidden, false);
+  assert.equal(env.run('liveResultExpiryTimer'), expiry);
+  env.get('preview').currentTime = 0.2; await env.run('sampleFrame()');
+  assert.equal(env.requests.filter((r) => r.path === '/api/frame').length, 2);
+  env.timers.get(expiry)();
+  assert.equal(env.get('live-assistant-return').hidden, true);
+  assert.equal(env.get('live-assistant-state').textContent, 'Observation expirée');
+  await env.run('cancelSession()');
+});
+test('backend deadline hides the old observation and reports cancellation without stopping the camera', async () => {
+  let calls = 0;
+  const env = liveEnvironment((path) => path === '/api/harness/live/poll' ? ++calls === 1 ? liveObservation() : {
+    state: 'unavailable', analysis_state: 'cancelling', budget_remaining_ms: 0, result: null,
+  } : undefined);
+  await prepareFile(env); await enableLiveAssistant(env); await env.run('startTrial()'); await settle();
+  await env.run('pollLiveAssistant()');
+  assert.equal(env.get('live-assistant-return').hidden, true);
+  assert.equal(env.get('live-assistant-state').textContent, 'Arrêt de l’analyse…');
+  assert.equal(env.run('phase'), 'recording');
+  assert.equal(env.get('preview').paused, false);
+  assert.equal(env.get('guide-panel').hidden, false);
+  await env.run('cancelSession()');
+});
+test('accessible pause suspends only the assistant and leaves camera, frames and guide active', async () => {
+  const response = deferred();
+  const env = liveEnvironment((path) => path === '/api/harness/live/poll' ? response.promise : undefined);
+  await prepareFile(env); await enableLiveAssistant(env); await env.run('startTrial()');
+  assert.equal(env.get('live-assistant-controls').hidden, false);
+  assert.equal(env.get('live-assistant-pause').disabled, false);
+  const poll = env.requests.find((r) => r.path === '/api/harness/live/poll');
+  await env.get('live-assistant-pause').click();
+  assert.equal(poll.options.signal.aborted, true);
+  assert.equal(env.get('live-assistant').checked, false);
+  assert.equal(env.get('live-assistant-controls').hidden, true);
+  assert.equal(env.get('live-assistant-pause').disabled, true);
+  assert.equal(env.get('live-assistant-status').textContent, 'Assistant en pause · caméra maintenue');
+  assert.equal(env.run('phase'), 'recording');
+  assert.equal(env.get('preview').paused, false);
+  assert.equal(env.requests.filter((r) => r.path === '/api/session/cancel').length, 0);
+  env.get('preview').currentTime = 0.2; await env.run('sampleFrame()');
+  assert.equal(env.requests.filter((r) => r.path === '/api/frame').length, 2);
+  assert.equal(env.get('guide-panel').hidden, false);
+  response.resolve(liveObservation()); await settle();
+  assert.equal(env.get('live-assistant-return').hidden, true);
+  await env.run('cancelSession()');
+});
+test('final note transport timeout is bounded to server budget plus five seconds and preserves the draft', async () => {
+  const env = liveEnvironment((path, options) => path === '/api/harness/draft' ? new Promise((resolve, reject) => {
+    options.signal.addEventListener('abort', () => reject(Object.assign(new Error('timeout'), { name: 'AbortError' })));
+  }) : undefined);
+  await prepareFile(env); await env.run('startTrial()'); await env.run('finishSession(false)');
+  const draft = env.get('draft').textContent, result = env.run('JSON.stringify(resultDocument)');
+  const writing = env.get('llm-draft').click(); await settle();
+  const deadline = [...env.timers.keys()].find((id) => env.timerDelays.get(id) === 35000);
+  assert.ok(deadline);
+  env.timers.get(deadline)(); await writing;
+  assert.equal(env.get('llm-status').textContent, 'Délai de l’assistant dépassé · brouillon conservé');
+  assert.equal(env.get('draft').textContent, draft);
+  assert.equal(env.run('JSON.stringify(resultDocument)'), result);
+  assert.equal(env.get('llm-draft').disabled, false);
+  await env.run('cancelSession()');
+});
+test('final assistant busy and transport fallback messages do not leak technical codes', async (t) => {
+  for (const [response, label] of [
+    [{ __httpStatus: 409, error: 'analysis_busy' }, 'Assistant occupé · brouillon conservé'],
+    [{ proposed_note: null, fallback_reason: 'inference_deadline_exceeded' }, 'Délai de l’assistant dépassé · brouillon conservé'],
+    [{ proposed_note: null, fallback_reason: 'inference_cancelled' }, 'Analyse interrompue · brouillon conservé'],
+    [{ proposed_note: null, fallback_reason: 'untrusted_error_with_secrets' }, 'Assistant indisponible · brouillon conservé'],
+  ]) await t.test(label, async () => {
+    const env = liveEnvironment((path) => path === '/api/harness/draft' ? response : undefined);
+    await prepareFile(env); await env.run('startTrial()'); await env.run('finishSession(false)');
+    const draft = env.get('draft').textContent;
+    await env.get('llm-draft').click();
+    assert.equal(env.get('llm-status').textContent, label);
+    assert.equal(env.get('draft').textContent, draft);
+    await env.run('cancelSession()');
+  });
 });

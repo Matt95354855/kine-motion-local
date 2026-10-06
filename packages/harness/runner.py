@@ -4,6 +4,7 @@ import json
 from dataclasses import dataclass
 from typing import Protocol
 
+from packages.harness.final_note import render_verified_note, supported_fact_codes
 from packages.harness.report import render_draft
 from packages.harness.tools import ToolContext, ToolRegistry
 
@@ -37,25 +38,34 @@ def run_harness(
         {
             "role": "system",
             "content": (
-                "Tu prépares uniquement une courte note descriptive en français pour revue par un kiné. "
-                "Utilise les outils de la séance. Ne déduis aucun diagnostic, exercice, dosage ou chiffre. "
-                "Réponds en JSON: {\"measurement_ref\": \"...\", \"text\": \"...\", "
-                "\"requires_professional_review\": true}. Le texte ne doit contenir aucun nombre."
+                "Tu restitues uniquement les faits techniques de la mesure courante pour revue par un kiné. "
+                "Utilise les outils de lecture de la séance avec arguments {}. "
+                "Ne déduis aucun diagnostic, exercice, dosage, chiffre ni fait depuis une image. "
+                "Réponds uniquement en JSON avec exactement measurement_ref, fact_codes et "
+                "requires_professional_review:true. Recopie intégralement supported_fact_codes, "
+                "sans ajout, omission ni doublon. Ne produis aucun texte libre. "
+                "L'application fixe seule la formulation de la note et ne valide aucune conclusion clinique."
             ),
         },
-        {"role": "user", "content": "Décris les limites observées pour la mesure de la séance courante."},
+        {"role": "user", "content": json.dumps({
+            "measurement_ref": context.measurement.measurement_id,
+            "supported_fact_codes": supported_fact_codes(context.measurement),
+        }, ensure_ascii=False)},
     ]
     used: list[str] = []
     try:
         if visual_enabled:
             evidence = registry.call("get_capture_keyframe", {}, context)
             messages[-1]["content"] = [
-                {"type": "text", "text": "Image de preuve " + str(evidence["evidence_ref"]) + ". Décris seulement ce qui est visible."},
+                {"type": "text", "text": messages[-1]["content"] + "\nImage de preuve disponible pour revue ; "
+                 "ne déduis aucun fait nouveau et restitue uniquement les codes de la mesure."},
                 {"type": "image_url", "image_url": {"url": evidence["image_url"]}},
             ]
             used.append("get_capture_keyframe")
         for _ in range(4):
             message = client.complete(messages, registry.definitions())
+            if not isinstance(message, dict):
+                raise ValueError("invalid_message")
             calls = message.get("tool_calls") or []
             if calls:
                 if len(used) + len(calls) > 4:
@@ -76,21 +86,8 @@ def run_harness(
                     messages.append({"role": "tool", "tool_call_id": call["id"], "content": content})
                 continue
 
-            candidate = json.loads(message["content"])
-            if not isinstance(candidate, dict) or set(candidate) != {
-                "measurement_ref", "text", "requires_professional_review"
-            }:
-                raise ValueError("invalid_schema")
-            note = candidate["text"]
-            if (
-                candidate["measurement_ref"] != context.measurement.measurement_id
-                or candidate["requires_professional_review"] is not True
-                or not isinstance(note, str)
-                or not 1 <= len(note) <= 500
-                or any(character.isdigit() for character in note)
-            ):
-                raise ValueError("invalid_claim")
+            note = render_verified_note(message["content"], context.measurement)
             return HarnessResult(draft, note, tuple(used), None)
         raise ValueError("round_limit")
-    except (KeyError, TypeError, IndexError, ValueError, OSError, TimeoutError) as exc:
-        return HarnessResult(draft, None, tuple(used), type(exc).__name__)
+    except (KeyError, TypeError, IndexError, AttributeError, RecursionError, ValueError, OSError, TimeoutError) as exc:
+        return HarnessResult(draft, None, tuple(used), getattr(exc, "code", type(exc).__name__))

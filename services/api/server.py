@@ -4,7 +4,7 @@ import argparse
 import json
 import os
 from base64 import b64encode
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -13,6 +13,7 @@ from urllib.error import URLError
 from urllib.parse import urlsplit
 
 from packages.harness.local_llm import LocalLLMClient
+from packages.harness.control import ControlledChatClient, InferenceControl
 from packages.harness.runner import run_harness
 from packages.harness.tools import ToolContext
 from packages.biomechanics.motion import frame_angle
@@ -20,6 +21,9 @@ from packages.biomechanics.protocols import get_protocol, protocol_catalog, rend
 from packages.pose.mediapipe_engine import MediaPipePoseEngine
 from packages.pose.synthetic_engine import SyntheticPoseEngine
 from services.api.state import MAX_JPEG_BYTES, SessionManager
+from services.api.live import LiveHarnessCoordinator
+from services.api.inference import DRAFT_BUDGET_SECONDS, LIVE_BUDGET_SECONDS, InferenceGate
+from packages.harness.window import WINDOW_MS, MAX_SAMPLES, MAX_IMAGES
 
 ROOT = Path(__file__).resolve().parents[2]
 WEB = ROOT / "apps" / "web"
@@ -51,10 +55,15 @@ def make_handler(
     llm_vision: bool = False,
     model_bindings: dict[str, ModelBinding] | None = None,
     remote_client: bool = False,
+    inference_gate: InferenceGate | None = None,
+    live_budget_seconds: float = LIVE_BUDGET_SECONDS,
+    draft_budget_seconds: float = DRAFT_BUDGET_SECONDS,
 ):
     bindings = model_bindings or configured_models()
     if llm_client is not None:
         bindings = {**bindings, "custom": ModelBinding("Modèle local personnalisé", llm_client, llm_vision, llm_vision)}
+    gate = inference_gate if inference_gate is not None else InferenceGate()
+    coordinator = LiveHarnessCoordinator(manager, inference_gate=gate, analysis_budget_seconds=live_budget_seconds)
 
     class Handler(BaseHTTPRequestHandler):
         def setup(self) -> None:
@@ -125,6 +134,11 @@ def make_handler(
                         "topology": {"camera": "browser_client", "compute": "server", "remote_client": remote_client,
                                      "connection": "ssh_tunnel_required" if remote_client else "loopback"},
                         "capture_limits": {"max_frames": 600, "max_jpeg_bytes": MAX_JPEG_BYTES, "sampling_interval_ms": 200},
+                        "live_harness": {"window_ms": WINDOW_MS, "max_samples": MAX_SAMPLES, "max_images": MAX_IMAGES,
+                                         "poll_interval_ms": 1000, "inference_interval_ms": 3000, "result_ttl_ms": 10000},
+                        "analysis_limits": {"live_budget_ms": round(live_budget_seconds * 1000),
+                                            "draft_budget_ms": round(draft_budget_seconds * 1000),
+                                            "max_concurrent": 1, "queue_capacity": 0, "transport_cancellation": True},
                         "llm_configured": any(item.client is not None for item in bindings.values()),
                         "llm_vision": any(item.image_enabled for item in bindings.values()),
                         "models": [
@@ -163,6 +177,8 @@ def make_handler(
                 if path == "/api/session/start":
                     doc = self._document()
                     session = manager.start(doc.get("side"), doc.get("protocol_id", "elbow_flexion_active"))
+                    coordinator.invalidate()  # Séance remplacée : ne pas attendre l'ancien LLM.
+                    gate.cancel_all()
                     self._json(201, {"session_id": session.session_id, "token": session.token})
                 elif path == "/api/frame":
                     if self.headers.get("Content-Type") != "image/jpeg":
@@ -189,6 +205,11 @@ def make_handler(
                                               "wrist": asdict(frame.wrist) if frame.wrist else None}})
                 elif path == "/api/session/finish":
                     doc = self._document()
+                    session_id, token = doc.get("session_id", ""), doc.get("token", "")
+                    if not manager.get(session_id, token).active:
+                        raise ValueError("Séance déjà terminée")
+                    coordinator.stop(session_id, token)
+                    gate.cancel_session(session_id, token)
                     measurement = manager.finish(
                         doc.get("session_id", ""),
                         doc.get("token", ""),
@@ -205,8 +226,42 @@ def make_handler(
                                      "evidence_ref": measurement.evidence_refs[0] if keyframe else None})
                 elif path == "/api/session/cancel":
                     doc = self._document()
-                    manager.cancel(doc.get("session_id", ""), doc.get("token", ""))
+                    session_id, token = doc.get("session_id", ""), doc.get("token", "")
+                    coordinator.stop(session_id, token)
+                    gate.cancel_session(session_id, token)
+                    try:
+                        manager.cancel(session_id, token)
+                    finally:
+                        # Un draft peut réserver entre la première interruption
+                        # et la révocation effective de la séance. Révoquer aussi
+                        # cette réservation, sans affecter une autre séance.
+                        gate.cancel_session(session_id, token)
                     self._json(200, {"cancelled": True})
+                elif path == "/api/harness/live/poll":
+                    doc = self._document()
+                    model_id = doc.get("model_id")
+                    if not isinstance(model_id, str) or model_id not in bindings:
+                        raise ValueError("Modèle inconnu")
+                    binding = bindings[model_id]
+                    include_image = doc.get("include_image", False)
+                    if not isinstance(include_image, bool) or (include_image and (
+                        not binding.supports_images or not binding.image_enabled or binding.client is None
+                    )):
+                        raise ValueError("Image non autorisée pour ce modèle")
+                    session_id, token = doc.get("session_id", ""), doc.get("token", "")
+                    control_version = doc.get("control_version")
+                    manager.configure_live(session_id, token, control_version, include_image)
+                    result = coordinator.poll(session_id, token, model_id, binding.client,
+                                              include_image=include_image, control_version=control_version)
+                    if not manager.live_is_current(session_id, token, control_version):
+                        raise PermissionError("Observation live révoquée")
+                    self._json(200, result)
+                elif path == "/api/harness/live/stop":
+                    doc = self._document()
+                    session_id, token = doc.get("session_id", ""), doc.get("token", "")
+                    manager.stop_live(session_id, token, doc.get("control_version"))
+                    coordinator.stop(session_id, token, control_version=doc.get("control_version"))
+                    self._json(200, {"stopped": True})
                 elif path == "/api/harness/draft":
                     doc = self._document()
                     model_id = doc.get("model_id")
@@ -223,11 +278,37 @@ def make_handler(
                     if measurement.protocol_id != "elbow_flexion_active":
                         self._json(409, {"error": "protocol_not_supported_by_harness"})
                         return
-                    result = run_harness(
-                        ToolContext(session_id, measurement, keyframe if include_image else None),
-                        binding.client,
-                        allow_visual_evidence=include_image,
-                    )
+                    control = InferenceControl(timeout_seconds=draft_budget_seconds)
+                    lease = None
+                    if binding.client is not None:
+                        lease = gate.try_acquire(control, session_id, token, "draft")
+                        if lease is None:
+                            self._json(409, {"error": "analysis_busy"})
+                            return
+                    try:
+                        context = ToolContext(session_id, measurement, keyframe if include_image else None)
+                        # L'instantané peut avoir été révoqué avant la réservation.
+                        # Vérifier après acquire empêche l'émission d'un vieux contexte.
+                        manager.get(session_id, token)
+                        control.check()
+                        # La limite couvre tous les tours, pas seulement un appel.
+                        result = run_harness(
+                            context,
+                            ControlledChatClient(binding.client, control) if binding.client is not None else None,
+                            allow_visual_evidence=include_image,
+                        )
+                        # Inclure aussi les outils et la validation après le dernier tour.
+                        control.check()
+                    except TimeoutError as exc:
+                        # Le brouillon local reste disponible, jamais la note tardive.
+                        result = replace(
+                            run_harness(context, None),
+                            fallback_reason=getattr(exc, "code", type(exc).__name__),
+                        )
+                    finally:
+                        control.cancel()
+                        if lease is not None:
+                            gate.release(lease)
                     manager.get(session_id, token)  # Refuse une réponse pour une séance révoquée entre-temps.
                     self._json(200, {**asdict(result), "model_id": model_id, "image_sent": include_image and binding.client is not None and keyframe is not None})
                 elif path == "/api/models/check":
@@ -256,6 +337,8 @@ def make_handler(
             except SocketTimeout:
                 self._json(408, {"error": "request_timeout"})
 
+    Handler.live_coordinator = coordinator
+    Handler.inference_gate = gate
     return Handler
 
 
@@ -310,6 +393,8 @@ def main() -> None:
     try:
         server.serve_forever()
     finally:
+        server.RequestHandlerClass.live_coordinator.close()
+        server.RequestHandlerClass.inference_gate.cancel_all()
         manager.close()
         server.server_close()
 

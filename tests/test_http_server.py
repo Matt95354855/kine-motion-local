@@ -131,7 +131,7 @@ class LocalHttpTests(unittest.TestCase):
                 self.messages.append(messages)
                 return {"content": json.dumps({
                     "measurement_ref": self.measurement_ref,
-                    "text": "La vue demande une vérification professionnelle.",
+                    "fact_codes": ["measurement_recorded", "protocol_experimental"],
                     "requires_professional_review": True,
                 })}
 
@@ -195,6 +195,8 @@ class LocalHttpTests(unittest.TestCase):
             text_result = post("/api/harness/draft", {**session, "model_id": "gpt_oss"})
             self.assertFalse(text_result["image_sent"])
             self.assertEqual(text_result["model_id"], "gpt_oss")
+            self.assertIsNotNone(text_result["proposed_note"])
+            self.assertIsNone(text_result["fallback_reason"])
             self.assertIsInstance(gpt.messages[0][1]["content"], str)
 
             qwen_text = post("/api/harness/draft", {**session, "model_id": "qwen36"})
@@ -202,6 +204,7 @@ class LocalHttpTests(unittest.TestCase):
             self.assertIsInstance(qwen.messages[0][1]["content"], str)
             qwen_visual = post("/api/harness/draft", {**session, "model_id": "qwen36", "include_image": True})
             self.assertTrue(qwen_visual["image_sent"])
+            self.assertIsNotNone(qwen_visual["proposed_note"])
             self.assertEqual(qwen.messages[1][1]["content"][1]["type"], "image_url")
         finally:
             server.shutdown()

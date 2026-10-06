@@ -1,6 +1,6 @@
 # Points restants — avant et après les essais
 
-État au 2 octobre 2026. « Test technique » signifie essai volontaire non clinique sur le poste cible. Les tests automatiques ne remplacent ni une validation de vidéo réelle ni un pilote auprès de patients.
+État actualisé au **6 octobre 2026** ; le tableau initial ci-dessous conserve l'avancement préparé le 2 octobre. « Test technique » signifie essai volontaire non clinique sur le poste cible. Les tests automatiques ne remplacent ni une validation de vidéo réelle ni un pilote auprès de patients. La livraison en cours et son statut de vérification/publication sont suivis dans [l'avancement du 6 octobre](progress-2026-10-06.md).
 
 ## Les cinq premiers points de la liste initiale
 
@@ -28,6 +28,10 @@
 - Expiration automatique et libération des captures sans requête ultérieure.
 - Clip géométrique synthétique, tests supplémentaires, CI synthétique Linux/Windows et scan avant publication.
 - README, matrice d'acceptation et checklist de test actualisés.
+- Harness live optionnel pendant capture, indépendant des requêtes de pose ; mémoire glissante 5 s/25 observations, jusqu'à deux JPEG après consentement, références temporelles. Codes d'observation vérifiés, sans texte clinique libre ; voir [le détail et les limites](live-harness.md).
+- Arrêt/changement de modèle/images avec versions de contrôle monotones, protection contre les anciennes requêtes et résultat obsolète masqué ; aucun retour live dans l'export final.
+- Points 3–4 du parcours temps réel : slot LLM unique partagé live/note sans file, budget total 10 s/30 s et transport HTTP interruptible ; retour caméra court contrôlé, âge actualisé, pause indépendante et personnage permanent. Voir les limites du runtime distant dans [le contrat live](live-harness.md).
+- Points 1–2 de l'audit du 6 octobre : regroupement des changements live pour une version de test identifiable sur `camera-guidance-local`, et note finale à codes factuels exacts vérifiés contre la mesure. Ancien JSON `text`, ajout/omission de fait et réponse contradictoire écartés ; formulation française déterministe et brouillon conservé. Aucun changement des modèles FP4. Voir [le contrat final](tool-integration.md).
 
 ## Avant de conclure au bon fonctionnement du parcours réel
 
@@ -38,6 +42,7 @@
 - Finaliser avec un kiné la fiche versionnée **de chaque mouvement** : position, côté/direction, vue, consigne, début/fin, motifs d'arrêt et critères de rejet. Le guide est une illustration, pas un protocole médical approuvé. Ne pas assimiler le proxy du cou à l'amplitude cervicale.
 - Annoter indépendamment des clips autorisés : bonnes vues, poignet masqué, hors plan, fond difficile, personne supplémentaire et résultats attendus. Aucun clip personnel dans Git.
 - Vérifier physiquement permissions, caméra externe, débranchement, veille, caméra occupée, changement de caméra et rechargement. L'arrêt testé avec média simulé n'est pas certifié pour toutes les caméras.
+- Ajouter une détection de **caméra silencieusement figée** et invalider l'essai incomplet. Quelques images reçues au début ne doivent pas suffire à présenter un mouvement entier comme capturé ; distinguer gel, perte réseau et pose absente.
 - Mesurer les images **présentées**, perdues/sautées et traitées : le compteur actuel donne les traitements, pas le nombre exact de pertes caméra. P95 d'aller-retour et volume JPEG ajoutés ; isoler capture/réseau/calcul/écran, tester Wi‑Fi/Ethernet et valider le seuil provisoire d'expiration des repères de 1 s.
 - Vérifier SSH sur le Windows : empreinte, compte, restriction du pare-feu, transferts autorisés, port occupé, interruption/reprise et webcam du client. Pas d'API ni de LLM exposés au LAN directement. Pour plusieurs utilisateurs, revoir l'authentification et l'isolation : une nouvelle séance révoque actuellement la précédente.
 - Résoudre les changements silencieux de personne après perte de suivi ; le refus de plusieurs personnes ne fournit pas une identité de suivi persistante.
@@ -48,15 +53,15 @@
 - Ajouter aux exports hash de pose, paramètres, dépendances et commit. Actuellement : convention, protocole/pipeline de mesure et version de capture sont présents.
 - Fixer avant le test les seuils techniques d'acceptation, conditions d'arrêt et cas de non-régression. Les 5 images/s actuelles n'atteignent pas l'objectif provisoire de 15 mises à jour/s du document de départ.
 
-## LLM / harness — volontairement non modifiés
+## LLM / harness — modèles inchangés, circuit live ajouté
 
 - Inventorier les poids exacts GPT‑OSS/Qwen 3.6 FP4 ; mesurer RAM/VRAM, contexte et chargements sur la RTX sans changer leur configuration à ce stade.
 - Tester réponses réelles, outils successifs, disponibilité et pannes ; un alias annoncé ne valide pas ces capacités.
 - Finaliser le contrat des futurs outils : schémas, permissions, limites, timeout, panne et preuves.
-- Fournir au harness un instantané temporel complet et figé si nécessaire. Le nouveau résumé sert au navigateur/export ; il n'a pas été ajouté au contexte LLM.
-- Définir une éventuelle séquence d'images Qwen, nombre maximal, références et consentement. **Qwen reçoit toujours au plus une image**, pas une vidéo ; GPT‑OSS ne reçoit aucune image.
-- Traiter réponses tronquées/format de sortie ; contrôler diagnostic, mauvais côté, nombres en lettres, affirmation inventée et rejet décrit comme réussite.
-- Annulation et limite totale **côté serveur** du harness : le navigateur bloque les doubles clics/ignore les réponses révoquées, mais ne tue pas une génération déjà lancée chez le LLM.
+- Qualifier les outils live et l'analyse des fenêtres de cinq secondes sur les serveurs réels. Les codes actuels décrivent uniquement le suivi technique ; exécution du geste, segmentation et répétitions ne sont pas encore analysées.
+- Tester le contexte visuel Qwen (au plus deux JPEG chronologiques de la fenêtre, outil opt-in). Note finale toujours limitée à une image ; pas de vidéo complète, GPT‑OSS sans pixels.
+- Qualifier la **note finale désormais fermée** avec les vrais LLM : restitution exacte des codes autorisés, rejet de l'ancien champ `text`, référence différente, codes manquants/ajoutés et essai rejeté décrit comme réussite. La formulation est déterministe et n'autorise aucune conclusion depuis l'image ; vérifier les taux de repli et l'utilité de ce parcours, sans confondre ce contrôle avec la validité de la mesure.
+- Qualifier l'interruption physique **côté runtime d'inférence** : l'application borne désormais l'analyse entière, coupe l'attente réseau et arbitre live/note sur un slot unique. Vérifier que le serveur LLM arrête aussi sa génération et libère la VRAM à la déconnexion ; les clients externes restent hors de cet arbitrage. Le watchdog d'un moteur natif de pose bloqué reste à développer.
 - Historique technique minimal : versions, outils/preuves, durée, erreurs/repli, sans données identifiantes.
 - Tests d'instructions parasites et accès interséance ; comparaison des deux LLM sur les mêmes cas.
 
@@ -95,4 +100,4 @@ Smartphone/HTTPS direct, qualification des nouveaux mouvements, 3D, suivi longit
 4. **Retour distant plus stable** : comparer Wi‑Fi/Ethernet, cadence adaptative et budget de latence ; tests de coupure, reconnexion volontaire, détection des changements de personne.
 5. **Revue et validation professionnelle** : décision explicite, identité du réviseur et historique ; avant patients seulement, gestion protégée des dossiers et des accès.
 
-Le contrat multi-protocoles du harness pourra être une étape séparée si autorisée ; les modèles et leur FP4 restent inchangés.
+Le live peut observer la qualité du suivi de tous les parcours, sans les valider. Le contrat de rédaction finale multi-protocoles reste une étape séparée ; les modèles et leur FP4 sont inchangés.

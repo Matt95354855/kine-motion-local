@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass
 from typing import Callable
 
 from packages.contracts.models import Measurement
+from packages.harness.final_note import supported_fact_codes
 from packages.harness.report import render_draft
 
 
@@ -44,6 +45,8 @@ class ToolRegistry:
             "get_capture_observation",
             "Lire la qualité et les références des images de la séance courante, sans vidéo brute.",
             lambda context: {
+                "measurement_ref": context.measurement.measurement_id,
+                "supported_fact_codes": list(supported_fact_codes(context.measurement)),
                 "trial_id": context.measurement.trial_id,
                 "quality_reasons": list(context.measurement.quality_reasons),
                 "valid_frame_count": context.measurement.valid_frame_count,

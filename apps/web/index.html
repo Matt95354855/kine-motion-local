@@ -29,7 +29,13 @@
         <div id="framing-guide" class="framing-guide" aria-hidden="true"><div class="framing-outline"></div><span id="framing-label">Épaule · coude · poignet</span></div>
         <div class="stage-top"><span id="capture-badge" class="stage-badge">Caméra inactive</span><span id="elapsed" class="stage-badge">00:00</span></div>
         <figure id="guide-panel" class="guide-panel"><figcaption><span class="guide-dot"></span> Guide du geste</figcaption><canvas id="guide-avatar" width="180" height="240" role="img" aria-label="Personnage montrant lentement la flexion puis l'extension du coude"></canvas><p id="guide-cue">Pliez doucement</p></figure>
-        <div id="live-feedback" class="live-feedback" role="status" aria-live="polite">Suivez le personnage à votre rythme</div>
+        <div id="live-assistant-controls" class="live-assistant-controls" hidden>
+          <div class="live-assistant-heading"><span class="live-assistant-label">Assistant · asynchrone</span><button id="live-assistant-pause" class="assistant-pause" type="button" aria-label="Mettre l’assistant en pause sans arrêter la caméra" disabled>Pause</button></div>
+          <span id="live-assistant-state" class="live-assistant-state">En attente</span>
+          <div id="live-assistant-return" class="live-assistant-return" hidden><p id="live-assistant-text"></p><div class="live-assistant-meta"><span>Provisoire</span><span id="live-assistant-window"></span><span id="live-assistant-freshness"></span></div></div>
+        </div>
+        <span id="live-assistant-announcement" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></span>
+        <div id="live-feedback" class="live-feedback">Suivez le personnage à votre rythme</div>
       </div>
       <div class="capture-controls">
         <div class="source-controls"><button id="camera-start" class="secondary">Ouvrir la caméra</button><label class="file-button" for="video-file">Importer une vidéo</label><input id="video-file" type="file" accept="video/mp4,video/webm,video/quicktime"><label for="camera-device" class="sr-only">Caméra</label><select id="camera-device" aria-label="Caméra"><option value="">Caméra par défaut</option></select></div>
@@ -47,7 +53,7 @@
     </section>
     <details class="assistant-panel">
       <summary><span>Assistant local</span><span class="muted">GPT‑OSS / Qwen 3.6</span></summary>
-      <div class="assistant-content"><div class="assistant-actions"><label for="llm-model" class="sr-only">Modèle local</label><select id="llm-model" disabled><option value="gpt_oss">GPT-OSS</option><option value="qwen36">Qwen 3.6</option></select><button id="check-model" class="secondary" disabled>Vérifier</button><button id="llm-draft" disabled>Préparer une note</button></div><p id="model-status" class="muted">Chargement…</p><label class="vision-option"><input id="include-image" type="checkbox" disabled> Joindre l’image de preuve</label><p id="llm-status" class="muted" aria-live="polite"></p><pre id="llm-note"></pre></div>
+      <div class="assistant-content"><div class="assistant-actions"><label for="llm-model" class="sr-only">Modèle local</label><select id="llm-model" disabled><option value="gpt_oss">GPT-OSS</option><option value="qwen36">Qwen 3.6</option></select><button id="check-model" class="secondary" disabled>Vérifier</button><button id="llm-draft" disabled>Préparer une note</button></div><p id="model-status" class="muted">Chargement…</p><div class="assistant-options"><label class="vision-option"><input id="live-assistant" type="checkbox" disabled> Assistant pendant l’essai</label><label class="vision-option"><input id="include-image" type="checkbox" disabled> Autoriser les images · jusqu’à 2 récentes en direct, 1 preuve après l’essai</label></div><p id="live-assistant-status" class="muted"></p><pre id="live-assistant-detail"></pre><p id="llm-status" class="muted" aria-live="polite"></p><pre id="llm-note"></pre></div>
     </details>
     <footer>Mesures expérimentales · revue professionnelle requise <span>Guide illustratif, pas une prescription. Arrêtez en cas de douleur ou de gêne.</span></footer>
   </main>

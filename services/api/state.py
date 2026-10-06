@@ -1,4 +1,4 @@
-"""Séance éphémère : les JPEG ne sont jamais conservés par l'application."""
+"""Séance éphémère : aucune capture sur disque, mémoire live courte et bornée."""
 
 from dataclasses import dataclass, field, replace
 from secrets import token_urlsafe
@@ -11,6 +11,8 @@ from packages.biomechanics.protocols import angle_and_reason, assess_trial, get_
 from packages.biomechanics.motion import summarize_motion
 from packages.contracts.models import ElbowTrial, Measurement, PoseFrame
 from packages.pose.adapter import PoseEngine
+from packages.harness.live import LiveSnapshot
+from packages.harness.window import RollingCaptureWindow
 
 MAX_FRAMES = 600
 MAX_JPEG_BYTES = 1_000_000
@@ -33,6 +35,9 @@ class CaptureSession:
     keyframe_angle: float = -1.0
     keyframe_timestamp_ms: int | None = None
     motion_summary: dict | None = None
+    live_window: RollingCaptureWindow = field(default_factory=RollingCaptureWindow)
+    live_control_version: int = -1
+    live_enabled: bool = False
 
 
 class SessionManager:
@@ -52,6 +57,8 @@ class SessionManager:
             with self._lock:
                 if self._session and monotonic() > self._session.expires_at:
                     self._close_previous()
+                elif self._session:
+                    self._session.live_window.purge(monotonic())
 
     def start(self, side: str, protocol_id: str = "elbow_flexion_active") -> CaptureSession:
         if side not in ("left", "right"):
@@ -85,6 +92,8 @@ class SessionManager:
                 previous.keyframe_timestamp_ms = None
                 previous.measurement = None
                 previous.motion_summary = None
+                previous.live_window.clear()
+                previous.live_enabled = False
 
     def get(self, session_id: str, token: str) -> CaptureSession:
         with self._lock:
@@ -144,12 +153,78 @@ class SessionManager:
             if reason != "rotation_not_measurable_2d":
                 frame = replace(frame, quality_reason=reason)
             session.frames.append(frame)
+            session.live_window.append(frame, jpeg, monotonic())
             if angle is not None and angle > session.keyframe_angle:
                 session.keyframe_angle = angle
                 session.keyframe_jpeg = jpeg
                 session.keyframe_sequence = sequence
                 session.keyframe_timestamp_ms = timestamp_ms
             return frame
+
+    def _live_session(self, session_id: str, token: str) -> CaptureSession:
+        session = self.get(session_id, token)
+        if not session.active:
+            raise ValueError("Observation live réservée à un essai en cours")
+        return session
+
+    def set_live_image_consent(self, session_id: str, token: str, enabled: bool) -> None:
+        with self._lock:
+            self._live_session(session_id, token).live_window.set_image_consent(enabled)
+
+    @staticmethod
+    def _check_live_version(control_version: int) -> None:
+        if type(control_version) is not int or not 0 <= control_version <= 1_000_000_000:
+            raise ValueError("Version de contrôle live invalide")
+
+    def configure_live(self, session_id: str, token: str, control_version: int, include_images: bool) -> None:
+        """Une vieille requête ne peut réactiver un consentement révoqué."""
+        self._check_live_version(control_version)
+        if type(include_images) is not bool:
+            raise ValueError("Consentement visuel booléen requis")
+        with self._lock:
+            session = self._live_session(session_id, token)
+            if control_version < session.live_control_version or (
+                control_version == session.live_control_version and not session.live_enabled
+            ):
+                raise PermissionError("Contrôle live révoqué")
+            session.live_control_version = control_version
+            session.live_enabled = True
+            session.live_window.set_image_consent(include_images)
+
+    def stop_live(self, session_id: str, token: str, control_version: int) -> None:
+        self._check_live_version(control_version)
+        with self._lock:
+            session = self.get(session_id, token)
+            if control_version < session.live_control_version:
+                raise PermissionError("Ancien contrôle live")
+            session.live_control_version = control_version
+            session.live_enabled = False
+            session.live_window.set_image_consent(False)
+
+    def live_is_current(self, session_id: str, token: str, control_version: int) -> bool:
+        with self._lock:
+            session = self.get(session_id, token)
+            return session.active and session.live_enabled and session.live_control_version == control_version
+
+    def live_window_info(self, session_id: str, token: str) -> dict:
+        with self._lock:
+            session = self._live_session(session_id, token)
+            return session.live_window.info(session_id, monotonic())
+
+    def live_snapshot(self, session_id: str, token: str, include_images: bool = False) -> LiveSnapshot:
+        with self._lock:
+            session = self._live_session(session_id, token)
+            window = session.live_window
+            info = window.info(session_id, monotonic())
+            images = tuple(item.jpeg for item in window.images) if include_images and window.image_consent else ()
+            image_metadata = tuple({"sequence": item.sequence, "timestamp_ms": int(item.timestamp_ms)}
+                                   for item in window.images) if images else ()
+            return LiveSnapshot(
+                session_id=session_id, window_ref=info["window_ref"], protocol_id=session.protocol_id,
+                side=session.side, start_timestamp_ms=info["start_timestamp_ms"],
+                end_timestamp_ms=info["end_timestamp_ms"], samples=window.observation_samples(), images=images,
+                image_metadata=image_metadata,
+            )
 
     def finish(
         self,
@@ -182,6 +257,8 @@ class SessionManager:
                 measurement = assess_trial(trial, session.protocol_id)
             finally:
                 session.active = False
+                session.live_enabled = False
+                session.live_window.clear()
                 session.engine.close()
             session.measurement = measurement
             session.motion_summary = summarize_motion(frames)

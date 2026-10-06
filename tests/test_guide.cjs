@@ -47,3 +47,15 @@ test('missing points never produce a connecting segment across an occlusion', ()
     points:[{x:.3,y:.2},null,{x:.4,y:.7}],connections:[[0,1],[1,2]]},true);
   assert.equal(env.calls.filter((call) => call.name === 'stroke').length,0);
 });
+test('assistant overlay reserves room for the permanent guide on desktop and small screens', () => {
+  const html = fs.readFileSync(require.resolve('../apps/web/index.html'), 'utf8');
+  const css = fs.readFileSync(require.resolve('../apps/web/style.css'), 'utf8');
+  assert.ok(!html.match(/<figure id="guide-panel"[^>]*\bhidden\b/));
+  assert.ok(!css.match(/\.guide-panel\s*\{[^}]*display:\s*none/));
+  assert.ok(css.includes('calc(100% - 205px)'));
+  assert.ok(css.includes('calc(100% - 155px)'));
+  assert.ok(css.includes('@media (max-width: 500px) { .camera-stage { aspect-ratio: 1 / 1; }'));
+  assert.ok(html.includes('Mettre l’assistant en pause sans arrêter la caméra'));
+  assert.ok(!html.match(/id="live-assistant-return"[^>]*aria-live/));
+  assert.ok(!html.match(/id="live-feedback"[^>]*aria-live/));
+});

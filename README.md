@@ -2,6 +2,22 @@
 
 Application web de capture et d'analyse **expérimentale** de mouvements, pour un poste unique ou deux ordinateurs reliés par un tunnel privé. Les résultats sont des projections 2D, pas des examens cliniques validés. Aucun diagnostic ni programme thérapeutique automatique.
 
+## Version à utiliser pour les tests
+
+La branche de test est [**`camera-guidance-local`**](https://github.com/Matt95354855/kine-motion-local/tree/camera-guidance-local), pas `main`, qui ne contient que le README d'orientation. Cette livraison du **6 octobre 2026** rassemble l'assistant continu, ses budgets/annulations, le retour caméra court et la sécurisation de la note finale. Les instructions de clonage ci-dessous sélectionnent cette branche explicitement.
+
+Sur un clone existant, arrêter l'application puis, depuis le dépôt :
+
+```sh
+git status --short
+git fetch origin
+git switch camera-guidance-local
+git pull --ff-only origin camera-guidance-local
+git rev-parse HEAD
+```
+
+S'il existe des modifications locales ou si Git refuse le changement/la mise à jour, les préserver et résoudre ce point avant de poursuivre : ne pas réinitialiser le dépôt. Noter le SHA affiché pour identifier exactement la version testée, puis redémarrer l'application. Détails de la livraison et limites : [avancement du 6 octobre](docs/progress-2026-10-06.md).
+
 ## Ce qui a été développé
 
 - Interface épurée : caméra au centre, contrôles courts, compte rendu et assistant repliés.
@@ -14,11 +30,16 @@ Application web de capture et d'analyse **expérimentale** de mouvements, pour u
 - Retour retardé de plus d'une seconde : repères masqués ; anciens repères également effacés après une seconde en attendant la requête suivante. Aller-retour affiché en ms, P95 et volume JPEG dans l'export. Arrêt à deux minutes indépendant d'une requête bloquée.
 - Courbe temporelle brute, durée observée, couverture des images et aperçu de l'image du pic. Les lacunes ne sont pas interpolées.
 - Export explicite du brouillon `.txt` et des données de test `.json`, sans jeton de séance ni pixels. Les exports restent **non validés**.
-- Séance éphémère : toutes les images non retenues sont libérées ; au plus une image de preuve en mémoire serveur. Effacement au nouvel essai, à l'annulation ou après 15 minutes, même sans nouvelle requête.
+- Assistant **pendant l'essai**, optionnel : observations techniques d'une fenêtre récente, indépendantes de la capture. Retour provisoire sur l'image avec intervalle analysé ; aucune observation live dans le compte rendu/export final.
+- Mémoire glissante serveur : **5 secondes / 25 observations / 2 JPEG maximum**. Images récentes uniquement après accord visuel explicite ; suppression des références expirées, même sans nouvelle capture. Aucun enregistrement de vidéo sur disque.
+- Une seule analyse LLM pour toute l'application, live et note finale partagent le même slot sans file d'attente. Budget total de 10 s maximum en live / 30 s pour la note, partagé entre tours et outils. Arrêt, expiration ou remplacement de séance interrompent l'attente HTTP et empêchent les réponses tardives ; cela ne garantit pas l'arrêt du calcul GPU distant.
+- Note finale sans texte libre du modèle : codes factuels vérifiés contre la mesure, formulation française produite par l'application et revue professionnelle obligatoire. Réponse ancienne, contradictoire ou mal formée : note écartée, brouillon déterministe conservé.
+- Retour caméra court : état contrôlé du suivi, intervalle, âge et badge provisoire. Pause de l'assistant sans arrêter la caméra ni masquer le personnage ; détails repliés et annonces accessibles dédupliquées.
+- Séance éphémère : une image de preuve finale distincte peut rester en mémoire serveur. Effacement au nouvel essai, à l'annulation ou après 15 minutes. La mémoire live est vidée à la fin de l'essai ; un instantané déjà transmis au LLM ne peut pas être retiré à distance.
 - Dépendances de pose verrouillées avec hashes, modèle vérifié par SHA-256, diagnostic RAM/GPU/disque, lanceur multiplateforme, tests et contrôle avant publication.
 - Lanceur du poste webcam : connexion SSH chiffrée vers le Windows, authentification et contrôle de clé par OpenSSH. API et LLM restent sur la boucle locale du Windows ; aucune webcam requise sur le serveur.
 
-**LLM inchangés : GPT‑OSS et Qwen 3.6 en FP4 restent ton choix.** Aucun poids LLM n'a été installé, remplacé ou reconfiguré. Le harness, ses outils, ses requêtes et les options des serveurs existants n'ont pas été modifiés. Il reste limité au coude ; l'API refuse les autres protocoles avant de l'appeler afin de ne pas rédiger une note de coude pour le cou ou le genou. Les nouveaux mouvements ont leur propre brouillon déterministe. La pose utilise le délégué CPU ; cela ne garantit pas l'absence de ressources graphiques auxiliaires selon la plateforme. Aucune compatibilité, occupation VRAM ou vitesse des deux LLM n'est certifiée ici.
+**Modèles inchangés : GPT‑OSS et Qwen 3.6 en FP4 restent ton choix.** Aucun poids, serveur, alias ni paramètre d'inférence n'a été installé, remplacé ou reconfiguré. Un nouveau harness live lit les observations techniques de tous les parcours ; il ne valide aucun mouvement et ne produit pas de texte clinique libre. Le harness de **note finale** existant reste limité au coude ; les autres mouvements ont leur propre brouillon déterministe. La pose utilise le délégué CPU ; cela ne garantit pas l'absence de ressources graphiques auxiliaires selon la plateforme. Aucune compatibilité, occupation VRAM ou vitesse des deux LLM n'est certifiée ici.
 
 ## Mouvements disponibles
 
@@ -117,9 +138,18 @@ MediaPipe reste derrière le drapeau `--experimental-pose` : dépendances native
 
 Le lanceur conserve les variables et options actuelles : `KINE_GPT_OSS_URL`, `KINE_GPT_OSS_MODEL`, `KINE_QWEN36_URL`, `KINE_QWEN36_MODEL`, ou les options `--gpt-oss-url`, `--gpt-oss-model`, `--qwen-url`, `--qwen-model`. Il ne change ni leur quantification FP4 ni leur configuration d'inférence.
 
-Les serveurs déjà démarrés doivent écouter sur la boucle locale avec les endpoints existants `/v1/models` et `/v1/chat/completions`. Les alias doivent correspondre exactement à ceux annoncés par les serveurs. GPT‑OSS reste textuel. L'envoi d'une image à Qwen demeure un double consentement explicite : option existante `--qwen-vision` et case « Joindre l'image » pour la demande concernée. Aucun envoi automatique.
+Les serveurs déjà démarrés doivent écouter sur la boucle locale avec les endpoints existants `/v1/models` et `/v1/chat/completions`. Les alias doivent correspondre exactement à ceux annoncés par les serveurs. GPT‑OSS reste textuel. L'envoi d'images à Qwen exige l'option existante `--qwen-vision` et la case « Autoriser les images ». La note finale reçoit au plus une preuve ; le live peut fournir au modèle jusqu'à deux images récentes par instantané, après demande de son outil visuel. Aucun envoi visuel sans accord.
 
-Sans serveur LLM, la capture, les calculs, la courbe et le brouillon déterministe fonctionnent. La note proposée par le LLM reste séparée des mesures et n'est disponible que pour le coude à ce stade. Voir [le harness existant](docs/tool-integration.md).
+Sans serveur LLM, la capture, les calculs, la courbe et le brouillon déterministe fonctionnent. La note finale reste séparée des mesures et n'est disponible que pour le coude à ce stade. Le modèle doit restituer les codes factuels autorisés par les données de la séance ; seul le code de l'application construit le texte affiché. Aucun diagnostic, exercice, dosage, angle inventé ou nombre en lettres provenant du modèle n'est accepté. Les images ne peuvent pas introduire une nouvelle conclusion dans cette note. Ce contrat remplace l'ancien JSON contenant un champ `text` : une réponse à l'ancien format est rejetée sans perdre le brouillon. Voir [le contrat des outils](docs/tool-integration.md).
+
+### Activer l'assistant pendant l'essai
+
+1. Ouvrir « Assistant local », sélectionner ton serveur existant et cliquer « Vérifier ». Un alias annoncé ne prouve pas la compatibilité des outils ou des images.
+2. Pour Qwen visuel seulement, cocher l'accord images avant d'activer le live. GPT‑OSS ne reçoit jamais de pixels.
+3. Cocher « Assistant pendant l'essai », après ouverture de la caméra/import du clip, ou pendant la capture. Ce consentement doit être renouvelé au nouvel essai et après changement de modèle/images.
+4. Démarrer : le moteur de pose continue de traiter les images ; le harness examine des fenêtres récentes indépendamment. Les réponses obsolètes sont masquées, pas affichées comme synchrones.
+
+Le live est un **premier socle d'observation technique** : disponibilité/absence/suivi partiel des repères, ou guide sans angle. Le modèle choisit un code vérifié contre les données ; l'application rend le libellé, jamais son texte libre. « Pause » laisse le guide et la capture actifs. Une note finale demandée pendant une analyse est refusée immédiatement, sans attente en file. Il ne juge pas encore l'exécution du geste, les répétitions ou une vidéo complète. Essai toujours limité à deux minutes ; cadence LLM dépendante de ton matériel. Détails, API, mémoire, budgets et limites dans [le README du harness continu](docs/live-harness.md).
 
 ## Vérifications et diagnostic
 
@@ -138,15 +168,22 @@ python -m scripts.benchmark_pose --frames 30
 
 Le microbenchmark utilise **des images vides** : ses chiffres ne représentent ni le suivi d'une personne ni les performances GPU/LLM. Le diagnostic affiche uniquement des informations techniques locales ; aucune photo, aucune identité, aucun secret.
 
-La suite multi-protocoles/tunnel compte **42 tests Python et 18 tests JavaScript réussis**, sur le Mac Intel de développement puis [en CI Linux/Windows pour le commit 30fc285](https://github.com/Matt95354855/kine-motion-local/actions/runs/37003791595), sans poids ni GPU. Elle vérifie notamment les conventions, la qualité par mouvement, l'absence de mesure de rotation, le refus des notes hors coude et les changements de protocole. Détails dans [le suivi multi-protocoles](docs/progress-multi-protocol.md). Interface inspectée dans le navigateur intégré ; modèle réel initialisé et absence de pose vérifiée sur image noire sur Mac. Les tests physiques webcam, SSH entre tes postes, mouvements réels, mode hors réseau et RTX ne constituent pas des validations acquises.
+Le socle multi-protocoles/tunnel avait **42 tests Python et 18 tests JavaScript réussis**, sur le Mac Intel puis [en CI Linux/Windows pour le commit 30fc285](https://github.com/Matt95354855/kine-motion-local/actions/runs/37003791595), sans poids ni GPU. Les nouveaux tests live couvrent la mémoire courte, les outils, les limites, le consentement, les réponses mal formées, les arrêts et les courses entre requêtes ; voir [les vérifications du harness continu](docs/live-harness.md). Les tests physiques webcam, SSH entre tes postes, mouvements réels, serveurs LLM/FP4, mode hors réseau et RTX ne constituent pas des validations acquises.
+
+Livraison du **6 octobre 2026 : 155 tests Python + 56 tests JavaScript réussis, soit 211 tests**, dont 16 nouveaux tests de la note finale. Syntaxe JavaScript et diff vérifiés ; scan de 85 fichiers sans artefact interdit ni secret usuel détecté (non exhaustif). Vérifications locales sur Python 3.11.14, sans webcam, LLM ni GPU réels. Consulter [GitHub Actions pour cette branche](https://github.com/Matt95354855/kine-motion-local/actions?query=branch%3Acamera-guidance-local) et comparer le SHA testé, plutôt que réutiliser la preuve d'un ancien commit.
 
 ## Suite du projet
 
+- [Livraison de test et note finale sécurisée — 6 octobre](docs/progress-2026-10-06.md)
+- [Temps réel : budgets, annulation et retour court](docs/progress-2026-10-05.md)
 - [Travail réalisé et preuves](docs/progress-2026-10-02.md)
 - [Points restants avant et après les tests](docs/remaining-work.md)
 - [Guide de test sur la machine GPU](docs/gpu-test-checklist.md)
 - [Connexion des deux machines](docs/two-machine-setup.md), [protocoles POC](docs/movement-protocols.md)
+- [Harness pendant la capture et mémoire glissante](docs/live-harness.md)
 - [Destination du logiciel](docs/intended-use.md), [périmètre](docs/scope-v1.md), [exigences](docs/requirements.md)
 - [Matrice d'acceptation](docs/acceptance-matrix.md), [capacités mesurables](protocols/measurement-capabilities.yaml), [risques](docs/risk-register.md)
 
 Pas encore de dossier patient, base de séances, correction manuelle des repères, validation professionnelle signée, comptage fiable des répétitions, catalogue d'exercices approuvé ou capture smartphone sécurisée. Ne pas publier de captures personnelles, de poids, de certificats ou de dossiers réels sur GitHub. Le choix d'une licence du projet et la revue des licences tierces restent ouverts.
+
+Avant une campagne de précision, il reste notamment à détecter une caméra silencieusement figée et à invalider sa capture incomplète, contrôler les pics parasites et compléter la provenance des exports. La durée/qualité des seules images reçues ne prouve pas que tout le mouvement a été capturé. Le premier essai Windows doit vérifier une vraie détection de personne, puis la liaison SSH et les serveurs LLM existants ; aucune de ces preuves matérielles n'est acquise par les tests automatiques.

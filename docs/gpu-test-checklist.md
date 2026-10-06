@@ -4,7 +4,7 @@ Vérification technique volontaire, **pas une validation clinique**. Garder GPT�
 
 ## Préparer
 
-- Récupérer `camera-guidance-local`, installer le profil Windows/Linux du README.
+- Récupérer explicitement `camera-guidance-local`, pas `main` ; suivre les instructions de mise à jour du README en préservant les modifications locales. Noter le SHA avec `git rev-parse HEAD`, puis installer le profil Windows/Linux. Vérifier la CI du **même commit** ; un ancien résultat vert ne qualifie pas la livraison actuelle.
 - Sur le Windows **sans webcam**, installer seulement le calcul et la pose ; lancer avec `--remote-client`. Les serveurs GPT‑OSS/Qwen restent sur sa boucle locale.
 - Sur le poste webcam, suivre `two-machine-setup.md` : client OpenSSH + Python, contrôle de l'empreinte du Windows et pare-feu privé, lanceur `scripts.start_client`. Pas de pose/LLM à installer sur ce poste.
 - Exécuter `scripts.check_install --pose-smoke` avec le Python de `.venv`. Noter commit, OS, Python, pose/hash, RAM, GPU/pilote et VRAM disponible. Aucun LLM chargé.
@@ -21,6 +21,7 @@ Vérification technique volontaire, **pas une validation clinique**. Garder GPT�
 - Masquer un repère requis, sortir du cadre, tester une seconde personne : abstention/rejet. Masquer un poignet pendant un test du genou ne doit pas invalider ses repères visibles. Aucun suivi de personne silencieux après occlusion.
 - Terminer : pistes arrêtées, résultat expérimental, courbe et timestamp du pic. Sans confirmation de qualité, aucune valeur de mesure.
 - Arrêter : coupure rapide même pendant la réponse réseau, essai rejeté. Tester aussi débranchement, veille/arrière-plan, permission refusée et caméra occupée.
+- Rechercher une image figée sans déconnexion explicite. Le watchdog de gel n'est pas encore développé : si la caméra ne produit plus d'images récentes, arrêter volontairement, ne pas retenir la mesure et noter le défaut. Le compteur des seules images traitées ne prouve pas une capture complète.
 - Importer un H.264/WebM court : début, temps source, fin et pic. Essayer vidéo trop longue/volumineuse et codec illisible.
 - Exporter : brouillon non validé, mode simulation/expérimental, pas de token/JPEG dans le JSON.
 - Nouvel essai : ancienne preuve/courbe/note révoquées. Faire 10 essais et comparer la mémoire.
@@ -41,12 +42,29 @@ Vérification technique volontaire, **pas une validation clinique**. Garder GPT�
 - Sans LLM, le brouillon déterministe reste disponible.
 - Les notes LLM restent limitées au coude ; bouton désactivé et refus API pour les nouveaux mouvements. Les brouillons multi-protocoles ne sont pas générés par un LLM.
 - « Vérifier » teste seulement l'alias. Demande de note distincte de la mesure, aucune validation automatique ; réglage FP4 inchangé.
+- Contrat final du 6 octobre : réponse avec `measurement_ref`, `fact_codes`, `requires_professional_review:true` seulement, et restitution exacte de `supported_fact_codes`. Aucun texte libre du modèle n'est affiché ; la phrase française vient de l'application. L'ancien JSON `text` doit produire un repli, pas une note. Voir [le contrat](tool-integration.md).
+- Comparer une mesure exploitable, limitée et rejetée : la note doit conserver les réserves factuelles autorisées, sans transformer un rejet en réussite ni ajouter un diagnostic ou un exercice. Relever les réponses mal formées et les replis avec chaque LLM, sans changer les paramètres FP4.
 - GPT‑OSS : aucune image. Qwen : seulement le pic et les deux accords existants ; jamais la vidéo complète.
 - Note après nouvel essai : ne doit pas réapparaître. Annuler côté navigateur ne garantit pas l'arrêt côté serveur LLM.
+
+### Assistant pendant l'essai — nouveau parcours optionnel
+
+- Après préparation de la source, sélectionner le modèle existant, « Vérifier » son alias et activer l'assistant live. Cocher les images avant le live si Qwen visuel autorisé. Aucun changement FP4, poids ou serveur.
+- Démarrer : la pose/guide doivent continuer pendant une analyse LLM lente. Le retour distingue une observation provisoire et son intervalle source ; il ne valide pas l'exécution du geste ni une mesure.
+- Vérifier absence d'images GPT‑OSS ; Qwen reçoit au plus deux JPEG récents/chronologiques seulement après consentement et demande de son outil. Aucun rattrapage d'images pré-consentement.
+- Tester les sept parcours ; la rotation reste un guide sans angle. Suivi perdu/partiel doit être décrit comme tel, pas comme un mouvement réussi.
+- « Pause » : retour assistant effacé, caméra/pose/personnage toujours actifs. Décocher, changer modèle/images ou finir l'essai : retour effacé, pas de réponse tardive, réactivation volontaire nécessaire. Intervalle/âge/provisoire lisibles ; détails repliés, pas de texte libre du modèle sur la caméra. Vérifier petit écran et animations réduites.
+- Ralentir le LLM : budget total 10 s maximum en live, réduit selon l'âge des observations, 30 s pour la note ; aucune nouvelle échéance à chaque outil. Tester attente avant en-têtes et corps reçu très lentement. Réponse expirée masquée/repli explicite, aucune file de fenêtres.
+- Demander deux notes simultanées, ou une note pendant le live : une seule analyse, deuxième demande refusée/état occupé, aucun empilement. Le slot ne doit pas être réutilisé tant qu'un ancien worker non coopératif n'est pas sorti.
+- Annuler pendant une génération, puis remplacer la séance : le transport local doit se fermer et aucune ancienne note/fenêtre ne doit réapparaître. Observer séparément durée de calcul et VRAM sur Windows : la déconnexion HTTP **ne garantit pas** que le runtime abandonne le calcul GPU. Noter ce comportement avant d'augmenter la charge.
+- Couper source/tunnel : contrôler arrêt existant et disparition des retours, y compris après retour à une page mise en cache.
+- Confirmer que le JSON/TXT final ne contient aucun texte live, JPEG, prompt ni token. La fenêtre courte est distincte de la courbe et de l'unique preuve finale.
+- Mesurer RAM/VRAM et durée réelle avec/sans images ; les tests simulés ne prouvent pas la compatibilité du serveur avec les nouveaux outils. Voir [mémoire, consentement et API live](live-harness.md).
 
 ## Retour utile et anonyme
 
 - Commit, système, caméra/résolution, mode/versions et diagnostic technique.
+- Identifier aussi le hash de pose, les versions du runtime/driver et les alias/variantes FP4 effectivement installés. Les exports ne contiennent pas encore toute cette provenance : la consigner séparément pour la campagne.
 - Étapes d'échec, message exact, fréquence, résultat attendu.
 - Démarrage/cadence/retards et RAM/VRAM avant/après ; alias des LLM existants sans chemin personnel.
 - Mauvais côté, repère faux, pic parasite, faux rejet/acceptation ou caméra non arrêtée : priorité maximale.

@@ -12,6 +12,23 @@ let trialDeadlineTimer = null;
 let poseExpiryTimer = null;
 let sequence = 0, startedAt = 0, clock = null, resultDocument = null, latestPose = null;
 let models = [], demo = false, llmBusy = false, serverReady = false;
+let liveHarnessLimits = null, liveGeneration = 0, liveTimer = null, livePending = null;
+let liveController = null, liveResultExpiryTimer = null;
+let liveFreshnessTimer = null;
+let analysisLimits = { draft_budget_ms: 30000 };
+let lastLiveObservation = "", lastLiveAnnouncement = "";
+const liveObservationLabels = {
+  awaiting_frames: "En attente", pose_visible: "Repères visibles", tracking_lost: "Suivi perdu",
+  tracking_partial: "Suivi partiel", guide_only: "Guide seul",
+};
+const liveObservationDetails = {
+  awaiting_frames: "En attente d’images récentes. Vue et stabilité à vérifier.",
+  pose_visible: "Repères disponibles sur la fenêtre indiquée. Vue et stabilité à vérifier.",
+  tracking_lost: "Suivi indisponible sur la fenêtre indiquée. Aucune mesure validée.",
+  tracking_partial: "Suivi partiel sur la fenêtre indiquée. Vue et stabilité à vérifier.",
+  guide_only: "Observation guidée uniquement, sans angle calculé. Vue et stabilité à vérifier.",
+};
+const readyModels = new Set();
 let limits = { max_frames: 600, sampling_interval_ms: 200 };
 let protocols = [{ id: "elbow_flexion_active", label: "Coude · flexion", view: "profil",
   framing: "Épaule, coude et poignet visibles", guide: "elbow", side_kind: "anatomical",
@@ -27,8 +44,8 @@ function message(error) {
     NotReadableError: "Caméra occupée ou déconnectée", OverconstrainedError: "Cette caméra n’est plus disponible",
     AbortError: "Délai dépassé ou opération annulée" })[error.name] || error.message;
 }
-async function request(path, options = {}, timeout = 15000) {
-  const controller = new AbortController();
+async function request(path, options = {}, timeout = 15000, ownedController = null) {
+  const controller = ownedController || new AbortController();
   controllers.add(controller);
   const timeoutId = setTimeout(() => controller.abort(), timeout);
   try {
@@ -36,12 +53,14 @@ async function request(path, options = {}, timeout = 15000) {
     const body = await response.json();
     if (!response.ok) throw new Error(({ forbidden: "Séance expirée ou non autorisée",
       invalid_request: "Capture ou paramètres invalides", pose_engine_unavailable: "Moteur de pose indisponible",
-      protocol_not_supported_by_harness: "L’assistant actuel prend en charge le coude uniquement" })[body.error] || `Erreur ${response.status}`);
+      protocol_not_supported_by_harness: "L’assistant actuel prend en charge le coude uniquement",
+      analysis_busy: "Assistant occupé · brouillon conservé",
+      analysis_deadline_exceeded: "Délai de l’assistant dépassé · brouillon conservé" })[body.error] || `Erreur ${response.status}`);
     return body;
   } finally { clearTimeout(timeoutId); controllers.delete(controller); }
 }
-function jsonPost(path, document, timeout) {
-  return request(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(document) }, timeout);
+function jsonPost(path, document, timeout, controller) {
+  return request(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(document) }, timeout, controller);
 }
 function controls() {
   const locked = !["idle", "ready", "completed"].includes(phase);
@@ -54,8 +73,142 @@ function controls() {
   $("finish").disabled = phase !== "recording";
   $("stop").disabled = ["idle", "completed", "finishing"].includes(phase);
   $("llm-draft").disabled = phase !== "completed" || llmBusy || !protocol.harness_supported;
+  const selected = models.find((item) => item.id === $("llm-model").value);
+  $("live-assistant").disabled = !serverReady || !liveHarnessLimits || !selected?.configured ||
+    !readyModels.has(selected.id) || !["idle", "ready", "recording"].includes(phase);
+  $("live-assistant-controls").hidden = !liveAssistantEligible();
+  $("live-assistant-pause").disabled = !liveAssistantEligible();
 }
 function setPhase(value) { phase = value; controls(); }
+function writeText(id, value) {
+  if ($(id).textContent !== value) $(id).textContent = value;
+}
+function announceLive(value) {
+  if (lastLiveAnnouncement === value) return;
+  lastLiveAnnouncement = value;
+  writeText("live-assistant-announcement", value);
+}
+function setLiveState(value, { announce = false } = {}) {
+  writeText("live-assistant-state", value);
+  writeText("live-assistant-status", value);
+  $("live-assistant-controls").hidden = !liveAssistantEligible();
+  if (announce) announceLive(value);
+}
+function clearLiveResult() {
+  clearTimeout(liveResultExpiryTimer); liveResultExpiryTimer = null;
+  clearInterval(liveFreshnessTimer); liveFreshnessTimer = null;
+  $("live-assistant-return").hidden = true;
+  for (const id of ["live-assistant-text", "live-assistant-window", "live-assistant-freshness", "live-assistant-detail"]) writeText(id, "");
+  lastLiveObservation = "";
+}
+function stopLiveAssistant({ clearOptIn = true, notify = true } = {}) {
+  ++liveGeneration;
+  clearInterval(liveTimer); liveTimer = null;
+  liveController?.abort(); liveController = null;
+  clearLiveResult();
+  if (clearOptIn) $("live-assistant").checked = false;
+  setLiveState("");
+  lastLiveAnnouncement = "";
+  writeText("live-assistant-announcement", "");
+  controls();
+  // Ce message ne bloque ni l'arrêt de la webcam ni la capture suivante.
+  if (notify && session) fetch("/api/harness/live/stop", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...session, control_version: liveGeneration }), keepalive: true,
+  }).catch(() => {});
+}
+function liveAssistantEligible() {
+  const selected = models.find((item) => item.id === $("llm-model").value);
+  return phase === "recording" && Boolean(session) && $("live-assistant").checked &&
+    Boolean(liveHarnessLimits) && selected?.configured && readyModels.has(selected.id);
+}
+function showLiveResponse(response, generation, operation, roundtripMs) {
+  const result = response.result;
+  const age = response.result_age_ms;
+  const ttl = liveHarnessLimits.result_ttl_ms;
+  const warmingUp = response.state === "warming_up" && Number.isFinite(response.window?.sample_count) &&
+    response.window.sample_count < 3;
+  const valid = result?.provisional === true && result.requires_professional_review === true &&
+    typeof result.window_ref === "string" && result.window_ref.length > 0 && result.window_ref.length <= 160 &&
+    typeof result.observation_code === "string" && Object.hasOwn(liveObservationLabels, result.observation_code) &&
+    Number.isFinite(result.start_timestamp_ms) && Number.isFinite(result.end_timestamp_ms) &&
+    result.start_timestamp_ms >= 0 && result.end_timestamp_ms >= result.start_timestamp_ms &&
+    Number.isFinite(age) && age >= 0;
+  if (!valid || warmingUp || age + roundtripMs >= ttl || response.state === "stale" || response.state === "unavailable") {
+    if (warmingUp || response.state === "stale" || response.state === "unavailable" || result) clearLiveResult();
+    const labels = { warming_up: "En attente", running: "Analyse en cours", busy: "Assistant occupé",
+      unavailable: "Assistant indisponible · caméra maintenue", stale: "Observation expirée" };
+    const state = response.analysis_state === "busy" || response.busy_reason === "analysis_busy" ? "busy" : response.state;
+    const label = response.analysis_state === "cancelling" ? "Arrêt de l’analyse…" : labels[state] || "En attente";
+    setLiveState(label, { announce: $("live-assistant-return").hidden });
+    return;
+  }
+  clearTimeout(liveResultExpiryTimer);
+  clearInterval(liveFreshnessTimer);
+  const label = liveObservationLabels[result.observation_code];
+  const interval = `${(result.start_timestamp_ms / 1000).toFixed(1)}–${(result.end_timestamp_ms / 1000).toFixed(1)} s`;
+  const fallbackLabels = { deadline_exceeded: "Délai atteint · observation du suivi uniquement.",
+    inference_deadline_exceeded: "Délai atteint · observation du suivi uniquement.",
+    inference_cancelled: "Analyse interrompue · observation du suivi uniquement.",
+    cancelled: "Analyse interrompue · observation du suivi uniquement." };
+  const sourceLabel = result.fallback_reason ? fallbackLabels[result.fallback_reason] || "Observation du suivi · assistant non utilisé." :
+    "Assistant local · observation technique uniquement.";
+  // Ni phrase libre du modèle ni code inconnu ne deviennent une consigne sur la caméra.
+  writeText("live-assistant-text", (demo ? "Simulation · " : "") + label);
+  writeText("live-assistant-window", `Fenêtre ${interval}`);
+  const displayedAt = performance.now(), initialAge = age + roundtripMs;
+  const refreshAge = () => {
+    if (generation !== liveGeneration || operation !== epoch || !liveAssistantEligible()) return;
+    writeText("live-assistant-freshness", `Âge ${Math.ceil((initialAge + Math.max(0, performance.now() - displayedAt)) / 1000)} s`);
+  };
+  refreshAge();
+  liveFreshnessTimer = setInterval(refreshAge, 1000);
+  writeText("live-assistant-detail", `${liveObservationDetails[result.observation_code]}\nFenêtre ${interval} · observation provisoire, distincte du compte rendu.\n${sourceLabel}`);
+  $("live-assistant-return").hidden = false;
+  const stateLabel = response.analysis_state === "busy" || response.state === "busy" ? "Assistant occupé" :
+    response.analysis_state === "cancelling" ? "Arrêt de l’analyse…" :
+    response.analysis_state === "running" || response.state === "running" ? "Analyse en cours" : "Observation récente";
+  setLiveState(stateLabel);
+  const observationKey = `${result.window_ref}:${result.observation_code}`;
+  if (lastLiveObservation !== observationKey) {
+    lastLiveObservation = observationKey;
+    announceLive(`Observation provisoire : ${label}. Fenêtre ${interval}.`);
+  }
+  liveResultExpiryTimer = setTimeout(() => {
+    if (generation !== liveGeneration || operation !== epoch || !liveAssistantEligible()) return;
+    clearLiveResult();
+    setLiveState("Observation expirée", { announce: true });
+  }, Math.max(0, ttl - age - roundtripMs));
+}
+async function pollLiveAssistant() {
+  if (!liveAssistantEligible() || livePending) return;
+  const generation = liveGeneration, operation = epoch, currentSession = session;
+  const selected = models.find((item) => item.id === $("llm-model").value);
+  const controller = new AbortController(), polledAt = performance.now();
+  liveController = controller;
+  const task = jsonPost("/api/harness/live/poll", { ...currentSession, control_version: generation, model_id: selected.id,
+    include_image: Boolean(selected.image_enabled && $("include-image").checked) }, 15000, controller);
+  livePending = task;
+  try {
+    const response = await task;
+    if (generation !== liveGeneration || operation !== epoch || !liveAssistantEligible()) return;
+    showLiveResponse(response, generation, operation, Math.max(0, performance.now() - polledAt));
+  } catch (error) {
+    if (generation !== liveGeneration || operation !== epoch || !liveAssistantEligible()) return;
+    clearLiveResult();
+    setLiveState("Assistant indisponible · caméra maintenue", { announce: true });
+  } finally {
+    if (livePending === task) livePending = null;
+    if (liveController === controller) liveController = null;
+  }
+}
+function startLiveAssistant() {
+  if (!liveAssistantEligible() || liveTimer || sequence === 0) return;
+  setLiveState("Analyse en cours", { announce: true });
+  // Le traitement du LLM et son transport restent indépendants de sampleFrame.
+  void pollLiveAssistant();
+  liveTimer = setInterval(pollLiveAssistant, liveHarnessLimits.poll_interval_ms);
+}
 function releaseMedia() {
   clearInterval(timer); timer = null;
   clearTimeout(trialDeadlineTimer); trialDeadlineTimer = null;
@@ -78,19 +231,28 @@ function clearResults() {
   $("export-report").disabled = $("export-json").disabled = true;
   KineGuide.drawPose($("pose-overlay"), null, false);
 }
-async function cancelSession() {
+function resetLocalCapture() {
   ++epoch;
   const old = session;
   session = null; source = null; llmBusy = false;
   controllers.forEach((controller) => controller.abort());
-  pending = null;
+  controllers.clear();
+  pending = null; livePending = null;
+  sequence = 0; startedAt = 0; clock = null;
   clearTimeout(expiryTimer); expiryTimer = null;
   releaseMedia(); clearResults();
   preview.classList.remove("mirrored");
   $("empty-state").hidden = false;
   $("capture-badge").textContent = "Caméra inactive";
   $("elapsed").textContent = "00:00";
+  $("frame-status").textContent = "Aucune image analysée";
+  $("live-feedback").textContent = "Ouvrez la caméra pour un nouvel essai";
   setPhase("idle");
+  return old;
+}
+async function cancelSession() {
+  stopLiveAssistant();
+  const old = resetLocalCapture();
   // La révocation n'appartient pas aux nouvelles opérations : une réponse tardive
   // ne peut ni effacer ni remplacer l'essai suivant.
   if (old) {
@@ -198,17 +360,18 @@ async function sampleFrame() {
     if (latestPose) poseExpiryTimer = setTimeout(() => {
       if (operation !== epoch || phase !== "recording") return;
       latestPose = null; KineGuide.drawPose($("pose-overlay"), null, false);
-      $("live-feedback").textContent = "Repères expirés — attente de l’analyse";
+      writeText("live-feedback", "Caméra · repères expirés");
     }, Math.max(0, 1000 - latencyMs));
     const feedback = response.quality_reason ? qualityLabels[response.quality_reason] || "Capture à vérifier" :
-      !protocol.quantified ? "Observation guidée · aucun angle calculé" :
-      response.angle_deg === null ? "Repères non exploitables" : `${Math.round(response.angle_deg)}° · projection 2D`;
-    $("live-feedback").textContent = (demo ? "Simulation · " : "") +
-      (delayed ? "Analyse retardée — repères masqués" : feedback);
+      !protocol.quantified ? "Guide seul" :
+      response.angle_deg === null ? "Repères non exploitables" : `${Math.round(response.angle_deg)}° · 2D`;
+    writeText("live-feedback", (demo ? "Simulation · " : "Caméra · ") +
+      (delayed ? "Repères retardés" : feedback));
     $("frame-status").textContent = `${response.sequence + 1} images · ${latencyMs} ms`;
     $("frame-status").title = `Aller-retour traitement : ${latencyMs} ms`;
     const seconds = Math.floor(timestamp / 1000);
     $("elapsed").textContent = `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
+    startLiveAssistant();
   })();
   pending = task;
   try { await task; }
@@ -230,7 +393,7 @@ async function startTrial() {
     expiryTimer = setTimeout(() => { cancelSession(); $("capture-details").textContent = "Séance expirée : données effacées"; }, 15 * 60 * 1000);
     setPhase("recording");
     trialDeadlineTimer = setTimeout(() => finishSession(false), MAX_DURATION_MS);
-    $("capture-badge").textContent = demo ? "Essai simulé" : "Analyse en cours";
+    $("capture-badge").textContent = demo ? "Essai simulé" : "Suivi caméra";
     await sampleFrame();
     if (operation !== epoch || phase !== "recording") return;
     await preview.play();
@@ -243,6 +406,7 @@ async function finishSession(stopped) {
   if (phase !== "recording" || !session) return;
   const operation = epoch, currentSession = session;
   const waiting = pending;
+  stopLiveAssistant();
   setPhase("finishing");
   // L'arrêt des pistes ne dépend pas du temps de réponse de l'analyse.
   releaseMedia();
@@ -254,7 +418,7 @@ async function finishSession(stopped) {
       view_confirmed: $("view-confirmed").checked, camera_stable_confirmed: $("stable-confirmed").checked, stopped });
     if (operation !== epoch) return;
     const sortedLatency = networkSamples.map((sample) => sample.roundtrip_ms).sort((a, b) => a - b);
-    resultDocument = { schema_version: "1.1", capture_version: "0.3.0-dev", mode: demo ? "synthetic_demo" : "mediapipe_experimental", source,
+    resultDocument = { schema_version: "1.1", capture_version: "0.4.0-dev", mode: demo ? "synthetic_demo" : "mediapipe_experimental", source,
       protocol: { ...protocol }, network: { processed_requests: networkSamples.length,
         total_jpeg_bytes: networkSamples.reduce((total, sample) => total + sample.jpeg_bytes, 0),
         roundtrip_p95_ms: sortedLatency.length ? sortedLatency[Math.ceil(sortedLatency.length * 0.95) - 1] : null },
@@ -306,8 +470,11 @@ function updateModelSelection() {
   $("include-image").disabled = !selected?.image_enabled;
   if (!selected?.image_enabled) $("include-image").checked = false;
   $("check-model").disabled = !selected?.configured;
-  $("model-status").textContent = !protocol.harness_supported ? "Assistant inchangé : disponible pour le coude uniquement. Brouillon descriptif pour ce mouvement." :
-    selected?.configured ? "Serveur configuré, non encore vérifié" : "Sans serveur : brouillon déterministe disponible";
+  $("model-status").textContent = selected?.configured ? readyModels.has(selected.id) ?
+    "Alias annoncé · outils et vision restent à tester" : "Serveur configuré · vérifiez l’alias pour l’assistant pendant l’essai" :
+    "Sans serveur : brouillon déterministe disponible";
+  if (!protocol.harness_supported) $("model-status").textContent += " · note finale disponible pour le coude uniquement";
+  controls();
 }
 function updateProtocol() {
   protocol = protocols.find((item) => item.id === $("protocol").value) || protocols[0];
@@ -344,7 +511,23 @@ $("protocol").addEventListener("change", async () => {
 });
 $("export-report").addEventListener("click", () => { if (resultDocument) download($("draft").textContent, "text/plain;charset=utf-8", "txt"); });
 $("export-json").addEventListener("click", () => { if (resultDocument) download(JSON.stringify(resultDocument, null, 2), "application/json", "json"); });
-$("llm-model").addEventListener("change", updateModelSelection);
+$("llm-model").addEventListener("change", () => { stopLiveAssistant(); updateModelSelection(); });
+$("include-image").addEventListener("change", () => { stopLiveAssistant(); controls(); });
+$("live-assistant").addEventListener("change", () => {
+  if (!$("live-assistant").checked) { stopLiveAssistant(); return; }
+  const selected = models.find((item) => item.id === $("llm-model").value);
+  if (!liveHarnessLimits || !selected?.configured || !readyModels.has(selected.id)) { stopLiveAssistant(); return; }
+  ++liveGeneration;
+  setLiveState(phase === "recording" ? "En attente" : "Activé pour cet essai");
+  controls();
+  startLiveAssistant();
+});
+$("live-assistant-pause").addEventListener("click", () => {
+  if (!liveAssistantEligible()) return;
+  stopLiveAssistant();
+  writeText("live-assistant-status", "Assistant en pause · caméra maintenue");
+  announceLive("Assistant en pause. La caméra continue.");
+});
 $("check-model").addEventListener("click", async () => {
   const selected = $("llm-model").value;
   $("model-status").textContent = "Vérification…";
@@ -352,8 +535,16 @@ $("check-model").addEventListener("click", async () => {
     const response = await jsonPost("/api/models/check", { model_id: selected });
     const labels = { ready: "Modèle annoncé par le serveur local", model_not_advertised: "Alias absent du serveur",
       runtime_unreachable: "Serveur inaccessible", not_configured: "Serveur non configuré" };
-    if ($("llm-model").value === selected) $("model-status").textContent = labels[response.state] || response.state;
-  } catch (error) { $("model-status").textContent = message(error); }
+    if (response.state === "ready") readyModels.add(selected); else readyModels.delete(selected);
+    if ($("llm-model").value === selected) {
+      if (response.state !== "ready") stopLiveAssistant();
+      $("model-status").textContent = (labels[response.state] || response.state) + (response.state === "ready" ? " · outils et vision non validés" : "");
+      controls();
+    }
+  } catch (error) {
+    readyModels.delete(selected);
+    if ($("llm-model").value === selected) { stopLiveAssistant(); $("model-status").textContent = message(error); controls(); }
+  }
 });
 $("llm-draft").addEventListener("click", async () => {
   if (phase !== "completed" || llmBusy || !session || !protocol.harness_supported) return;
@@ -361,12 +552,18 @@ $("llm-draft").addEventListener("click", async () => {
   llmBusy = true; controls(); $("llm-status").textContent = "Préparation de la note…";
   try {
     const response = await jsonPost("/api/harness/draft", { ...currentSession,
-      model_id: $("llm-model").value, include_image: $("include-image").checked }, 120000);
+      model_id: $("llm-model").value, include_image: $("include-image").checked }, analysisLimits.draft_budget_ms + 5000);
     if (operation !== epoch) return;
     $("llm-note").textContent = response.proposed_note || "Brouillon déterministe conservé";
-    $("llm-status").textContent = response.fallback_reason ? `Repli : ${response.fallback_reason}` :
+    const fallbackLabels = { deadline_exceeded: "Délai de l’assistant dépassé · brouillon conservé",
+      analysis_deadline_exceeded: "Délai de l’assistant dépassé · brouillon conservé",
+      inference_deadline_exceeded: "Délai de l’assistant dépassé · brouillon conservé",
+      inference_cancelled: "Analyse interrompue · brouillon conservé",
+      cancelled: "Analyse interrompue · brouillon conservé", analysis_busy: "Assistant occupé · brouillon conservé" };
+    $("llm-status").textContent = response.fallback_reason ? fallbackLabels[response.fallback_reason] || "Assistant indisponible · brouillon conservé" :
       `Note à revoir${response.image_sent ? " · une image transmise localement" : " · aucune image transmise"}`;
-  } catch (error) { if (operation === epoch) $("llm-status").textContent = message(error); }
+  } catch (error) { if (operation === epoch) $("llm-status").textContent = error.name === "AbortError" ?
+    "Délai de l’assistant dépassé · brouillon conservé" : message(error); }
   finally { if (operation === epoch) { llmBusy = false; controls(); } }
 });
 new ResizeObserver(() => {
@@ -375,8 +572,14 @@ new ResizeObserver(() => {
 }).observe($("camera-stage"));
 document.addEventListener("visibilitychange", () => { if (document.hidden && phase === "recording") finishSession(true); });
 window.addEventListener("pagehide", () => {
+  stopLiveAssistant({ notify: false });
+  if (session) navigator.sendBeacon("/api/harness/live/stop", new Blob([JSON.stringify({ ...session, control_version: liveGeneration })], { type: "application/json" }));
   if (session) navigator.sendBeacon("/api/session/cancel", new Blob([JSON.stringify(session)], { type: "application/json" }));
-  releaseMedia();
+  // Un retour depuis le cache du navigateur ne reprend jamais l'essai ni ses
+  // anciens repères. Les beacons sont les seuls messages d'arrêt sur ce chemin.
+  resetLocalCapture();
+  $("include-image").checked = false;
+  $("capture-details").textContent = "Essai quitté · aucune reprise automatique";
 });
 controls();
 request("/api/status").then((status) => {
@@ -388,6 +591,11 @@ request("/api/status").then((status) => {
   $("protocol").value = protocols[0].id;
   $("connection-status").textContent = status.topology?.remote_client ? "Calcul distant · caméra ici" : "Caméra ici · calcul local";
   limits = { ...limits, ...status.capture_limits };
+  if (Number.isFinite(status.analysis_limits?.draft_budget_ms) && status.analysis_limits.draft_budget_ms >= 1000 &&
+    status.analysis_limits.draft_budget_ms <= 30000) analysisLimits.draft_budget_ms = status.analysis_limits.draft_budget_ms;
+  if (status.live_harness) liveHarnessLimits = { window_ms: 5000, max_samples: 25, max_images: 2,
+    poll_interval_ms: 1000, inference_interval_ms: 3000, result_ttl_ms: 10000, ...status.live_harness };
+  $("live-assistant").title = liveHarnessLimits ? `JPEG récents purgés à la désactivation. Poses live conservées au plus ${liveHarnessLimits.window_ms / 1000} s, effacées à la fin de l’essai. Le résultat final reste séparé.` : "Assistant pendant l’essai indisponible sur ce serveur";
   $("llm-model").replaceChildren(...models.map((item) => {
     const option = document.createElement("option"); option.value = item.id; option.textContent = item.label; return option;
   }));
