@@ -75,12 +75,17 @@ class ControlledChatClient:
     réseau. Pour les autres, le résultat tardif est refusé après l'appel.
     """
 
-    def __init__(self, client, control: InferenceControl) -> None:
+    def __init__(self, client, control: InferenceControl,
+                 on_completion_start: Callable[[list[dict]], None] | None = None) -> None:
         self.client = client
         self.control = control
+        self.on_completion_start = on_completion_start
 
     def complete(self, messages: list[dict], tools: list[dict]) -> dict:
         self.control.check()
+        if self.on_completion_start is not None:
+            self.on_completion_start(messages)
+            self.control.check()
         method = getattr(self.client, "complete_controlled", None)
         if callable(method):
             message = method(messages, tools, self.control)

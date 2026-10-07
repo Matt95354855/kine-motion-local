@@ -52,12 +52,14 @@ button.assistant-pause:hover { background: #ffffff25; }
 .source-controls:has(#video-file:disabled) .file-button { opacity: .4; cursor: not-allowed; }
 .source-controls:has(#video-file:focus-visible) .file-button { outline: 3px solid #95cbb3; outline-offset: 3px; }
 button.stop-button { color: #9b514a; background: #fff5f0; border-color: #ead8d1; }
-.capture-bottom { display: flex; justify-content: space-between; align-items: center; gap: .7rem; padding: .1rem 1.3rem .85rem; font-size: .75rem; } .checks { display: flex; gap: 1rem; }
+.capture-bottom { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: .7rem; padding: .1rem 1.3rem .85rem; font-size: .75rem; } .checks { display: flex; gap: 1rem; }
+.check-reminder { color: #8a6a32; font-size: .68rem; }
 .checks label, .vision-option { display: flex; align-items: center; gap: .35rem; color: #66776c; font-size: .76rem; } input[type=checkbox] { accent-color: var(--green); }
 .capture-message { margin: 0; padding: .75rem 1.3rem; background: #fafbf8; border-top: 1px solid #edf0e9; font-size: .72rem; color: #829080; } .muted { color: var(--muted); font-size: .76rem; }
 .results-card { padding: 1.4rem; } .result-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1.1rem; }
 .metrics { display: grid; grid-template-columns: 1.2fr 1fr 1fr; gap: .8rem; } .metric { background: #f7f8f4; padding: 1.1rem; border-radius: 10px; } .metric span { display: block; color: #7d887a; font-size: .72rem; }
 .metric strong { display: block; margin-top: .45rem; font-size: 1.6rem; font-weight: 550; letter-spacing: -.045em; } .primary-metric { background: #edf4e6; } .primary-metric strong { color: #365c38; }
+.result-diagnostic { margin: .8rem 0 0; color: var(--muted); font-size: .73rem; line-height: 1.5; }
 .chart-wrap { margin: 1.2rem 0; } #angle-chart { display: block; width: 100%; height: 160px; } .chart-caption { display: flex; justify-content: space-between; font-size: .7rem; color: #829080; }
 .result-actions, .assistant-actions { display: flex; gap: .5rem; flex-wrap: wrap; } .details { border-top: 1px solid var(--line); margin-top: 1rem; padding-top: .9rem; } summary { cursor: pointer; color: #56705e; font-size: .82rem; }
 pre { white-space: pre-wrap; overflow-wrap: anywhere; font: .78rem/1.7 ui-monospace, monospace; background: #f7f8f4; border-radius: 8px; padding: 1rem; } pre:empty { display: none; }

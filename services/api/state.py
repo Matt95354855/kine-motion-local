@@ -1,11 +1,12 @@
 """Séance éphémère : aucune capture sur disque, mémoire live courte et bornée."""
 
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from secrets import token_urlsafe
 from threading import Event, RLock, Thread
 from time import monotonic
 from typing import Callable
 from uuid import uuid4
+from copy import deepcopy
 
 from packages.biomechanics.protocols import angle_and_reason, assess_trial, get_protocol
 from packages.biomechanics.motion import summarize_motion
@@ -13,6 +14,7 @@ from packages.contracts.models import ElbowTrial, Measurement, PoseFrame
 from packages.pose.adapter import PoseEngine
 from packages.harness.live import LiveSnapshot
 from packages.harness.window import RollingCaptureWindow
+from services.api.capture_integrity import CaptureIntegrity
 
 MAX_FRAMES = 600
 MAX_JPEG_BYTES = 1_000_000
@@ -38,14 +40,19 @@ class CaptureSession:
     live_window: RollingCaptureWindow = field(default_factory=RollingCaptureWindow)
     live_control_version: int = -1
     live_enabled: bool = False
+    capture_integrity: CaptureIntegrity | None = None
+    capture_summary: dict | None = None
+    llm_usage: dict = field(default_factory=dict)
 
 
 class SessionManager:
-    def __init__(self, engine_factory: Callable[[], PoseEngine], ttl_seconds: float = SESSION_TTL_SECONDS) -> None:
+    def __init__(self, engine_factory: Callable[[], PoseEngine], ttl_seconds: float = SESSION_TTL_SECONDS,
+                 capture_clock: Callable[[], float] = monotonic) -> None:
         if ttl_seconds <= 0:
             raise ValueError("Expiration positive requise")
         self._engine_factory = engine_factory
         self._ttl_seconds = ttl_seconds
+        self._capture_clock = capture_clock
         self._lock = RLock()
         self._session: CaptureSession | None = None
         self._shutdown = Event()
@@ -59,6 +66,11 @@ class SessionManager:
                     self._close_previous()
                 elif self._session:
                     self._session.live_window.purge(monotonic())
+                    if self._session.active:
+                        self._session.capture_integrity.observe(self._capture_clock())
+                        if self._session.capture_integrity.interrupted:
+                            self._session.live_enabled = False
+                            self._session.live_window.clear()
 
     def start(self, side: str, protocol_id: str = "elbow_flexion_active") -> CaptureSession:
         if side not in ("left", "right"):
@@ -74,6 +86,7 @@ class SessionManager:
                 protocol_id=protocol_id,
                 expires_at=monotonic() + self._ttl_seconds,
             )
+            session.capture_integrity = CaptureIntegrity(self._capture_clock())
             self._session = session
             return session
 
@@ -92,6 +105,9 @@ class SessionManager:
                 previous.keyframe_timestamp_ms = None
                 previous.measurement = None
                 previous.motion_summary = None
+                previous.capture_summary = None
+                previous.capture_integrity = None
+                previous.llm_usage.clear()
                 previous.live_window.clear()
                 previous.live_enabled = False
 
@@ -133,27 +149,45 @@ class SessionManager:
                 or timestamp_ms <= session.frames[-1].timestamp_ms
             ):
                 raise ValueError("Images non monotones")
-            observation = session.engine.detect(jpeg, timestamp_ms, session.side)
-            if not (0 < observation.width_px <= 1920 and 0 < observation.height_px <= 1080):
-                raise ValueError("Dimensions d'image hors limite")
-            frame = PoseFrame(
-                sequence=sequence,
-                timestamp_ms=timestamp_ms,
-                width_px=observation.width_px,
-                height_px=observation.height_px,
-                shoulder=observation.shoulder,
-                elbow=observation.elbow,
-                wrist=observation.wrist,
-                quality_reason=observation.quality_reason,
-                landmarks=dict(observation.landmarks),
-                protocol_id=session.protocol_id,
-                side=session.side,
-            )
-            angle, reason = angle_and_reason(frame, session.side)
+            received_at = self._capture_clock()
+            session.capture_integrity.receive(received_at, timestamp_ms)
+            try:
+                observation = session.engine.detect(jpeg, timestamp_ms, session.side)
+                # Un retour lent n'efface pas l'âge de l'image lors de sa réception.
+                session.capture_integrity.observe(self._capture_clock())
+                if not (0 < observation.width_px <= 1920 and 0 < observation.height_px <= 1080):
+                    raise ValueError("Dimensions d'image hors limite")
+                frame = PoseFrame(
+                    sequence=sequence,
+                    timestamp_ms=timestamp_ms,
+                    width_px=observation.width_px,
+                    height_px=observation.height_px,
+                    shoulder=observation.shoulder,
+                    elbow=observation.elbow,
+                    wrist=observation.wrist,
+                    quality_reason="capture_interrupted" if session.capture_integrity.interrupted else observation.quality_reason,
+                    landmarks=dict(observation.landmarks),
+                    landmark_diagnostics=dict(observation.landmark_diagnostics),
+                    protocol_id=session.protocol_id,
+                    side=session.side,
+                )
+                angle, reason = angle_and_reason(frame, session.side)
+            except Exception:
+                # Des JPEG reçus mais non traités ne rendent pas une capture complète.
+                # Sans ceci, des erreurs répétées pourraient garder un ancien pic valide.
+                session.capture_integrity.interrupted = True
+                session.live_enabled = False
+                session.live_window.clear()
+                session.keyframe_jpeg = None
+                raise
             if reason != "rotation_not_measurable_2d":
                 frame = replace(frame, quality_reason=reason)
             session.frames.append(frame)
-            session.live_window.append(frame, jpeg, monotonic())
+            if not session.capture_integrity.interrupted:
+                session.live_window.append(frame, jpeg, monotonic())
+            else:
+                session.live_enabled = False
+                session.live_window.clear()
             if angle is not None and angle > session.keyframe_angle:
                 session.keyframe_angle = angle
                 session.keyframe_jpeg = jpeg
@@ -163,7 +197,7 @@ class SessionManager:
 
     def _live_session(self, session_id: str, token: str) -> CaptureSession:
         session = self.get(session_id, token)
-        if not session.active:
+        if not session.active or session.capture_integrity.interrupted:
             raise ValueError("Observation live réservée à un essai en cours")
         return session
 
@@ -204,7 +238,8 @@ class SessionManager:
     def live_is_current(self, session_id: str, token: str, control_version: int) -> bool:
         with self._lock:
             session = self.get(session_id, token)
-            return session.active and session.live_enabled and session.live_control_version == control_version
+            return (session.active and not session.capture_integrity.interrupted
+                    and session.live_enabled and session.live_control_version == control_version)
 
     def live_window_info(self, session_id: str, token: str) -> dict:
         with self._lock:
@@ -233,11 +268,15 @@ class SessionManager:
         view_confirmed: bool | None,
         camera_stable_confirmed: bool | None,
         stopped: bool = False,
+        interruption_reason: str | None = None,
+        capture_monitor: dict | None = None,
     ) -> Measurement:
         with self._lock:
             session = self.get(session_id, token)
             if not session.active:
                 raise ValueError("Séance déjà terminée")
+            capture_summary = session.capture_integrity.finish(
+                self._capture_clock(), capture_monitor, interruption_reason)
             frames = tuple(
                 replace(
                     frame,
@@ -252,6 +291,7 @@ class SessionManager:
                 side=session.side,
                 frames=frames,
                 stopped=stopped,
+                interruption_reason="capture_interrupted" if capture_summary["interrupted"] else None,
             )
             try:
                 measurement = assess_trial(trial, session.protocol_id)
@@ -261,7 +301,24 @@ class SessionManager:
                 session.live_window.clear()
                 session.engine.close()
             session.measurement = measurement
+            session.capture_summary = capture_summary
             session.motion_summary = summarize_motion(frames)
+            # Diagnostics séparés : les quatre clés des échantillons utilisés
+            # par le harness live ne changent pas. Aucun pixel supplémentaire.
+            diagnostics = []
+            for frame in frames:
+                names = get_protocol(frame.protocol_id).names(frame.side)
+                diagnostics.append({
+                    "sequence": frame.sequence, "timestamp_ms": frame.timestamp_ms,
+                    "landmarks": {name: asdict(frame.landmark_diagnostics[name])
+                                  for name in names if name in frame.landmark_diagnostics},
+                })
+            session.motion_summary["pose_diagnostics"] = {
+                "schema_version": "1.0", "scope": "protocol_required_landmarks",
+                "score_interpretation": "detector_internal_not_angular_accuracy",
+                "available_frame_count": sum(bool(item["landmarks"]) for item in diagnostics),
+                "samples": diagnostics,
+            }
             session.frames.clear()
             if (
                 measurement.value_deg is None
@@ -278,6 +335,8 @@ class SessionManager:
             self.completed_measurement(session_id, token)
             session = self.get(session_id, token)
             return {"motion": session.motion_summary,
+                    "capture_integrity": session.capture_summary,
+                    "llm_usage": self.llm_usage_details(session_id, token),
                     "evidence_sequence": session.keyframe_sequence,
                     "evidence_timestamp_ms": session.keyframe_timestamp_ms if session.keyframe_jpeg else None}
 
@@ -285,6 +344,42 @@ class SessionManager:
         with self._lock:
             measurement = self.completed_measurement(session_id, token)
             return measurement, self.get(session_id, token).keyframe_jpeg
+
+    def record_llm_completion(self, session_id: str, token: str, model_id: str, kind: str,
+                              model: dict, image_authorized: bool, image_payload_attached: bool) -> None:
+        """Compteur borné d'appels commencés, sans prompt, réponse ou pixels."""
+        if kind not in ("live", "draft") or not isinstance(model_id, str) or not 1 <= len(model_id) <= 64:
+            raise ValueError("Provenance d'appel invalide")
+        with self._lock:
+            session = self.get(session_id, token)
+            if kind == "live" and (not session.active or session.capture_integrity.interrupted):
+                raise PermissionError("Capture révoquée pour l'analyse")
+            if kind == "draft" and session.active:
+                raise ValueError("Terminer la capture avant la note")
+            key = (model_id, kind)
+            if key not in session.llm_usage and len(session.llm_usage) >= 6:
+                raise ValueError("Limite de provenance LLM atteinte")
+            elapsed = round(max(0.0, self._capture_clock() - session.capture_integrity.started_at) * 1000, 1)
+            if key not in session.llm_usage:
+                session.llm_usage[key] = {
+                    "model_id": model_id, "kind": kind, "completion_call_count": 0,
+                    "first_call_elapsed_ms": elapsed, "last_call_elapsed_ms": elapsed,
+                    "image_authorized": False, "image_payload_attached": False, "model": deepcopy(model),
+                }
+            record = session.llm_usage[key]
+            record["completion_call_count"] += 1
+            record["last_call_elapsed_ms"] = elapsed
+            record["image_authorized"] = record["image_authorized"] or image_authorized
+            record["image_payload_attached"] = record["image_payload_attached"] or image_payload_attached
+
+    def llm_usage_details(self, session_id: str, token: str) -> dict:
+        with self._lock:
+            session = self.get(session_id, token)
+            return {
+                "schema_version": "1.0",
+                "meaning": "completion_attempts_started_not_proof_of_network_success_or_gpu_release",
+                "records": deepcopy(list(session.llm_usage.values())),
+            }
 
     def cancel(self, session_id: str, token: str) -> None:
         with self._lock:

@@ -4,7 +4,9 @@ Application web de capture et d'analyse **expérimentale** de mouvements, pour u
 
 ## Version à utiliser pour les tests
 
-La branche de test est [**`camera-guidance-local`**](https://github.com/Matt95354855/kine-motion-local/tree/camera-guidance-local), pas `main`, qui ne contient que le README d'orientation. Cette livraison du **6 octobre 2026** rassemble l'assistant continu, ses budgets/annulations, le retour caméra court et la sécurisation de la note finale. Les instructions de clonage ci-dessous sélectionnent cette branche explicitement.
+La branche de test est [**`camera-guidance-local`**](https://github.com/Matt95354855/kine-motion-local/tree/camera-guidance-local), pas `main`, qui ne contient que le README d'orientation. La livraison du **7 octobre 2026** ajoute les diagnostics du suivi, l'interruption persistante d'une capture incomplète et la traçabilité des essais au socle live/annulation du 6 octobre. Les instructions de clonage ci-dessous sélectionnent cette branche explicitement.
+
+Diagnostics par repère, pertes de suivi datées et contexte du maximum brut : le geste n'est pas déclaré incorrect à partir d'un défaut de suivi. Voir [ce qui change et ses limites](docs/analysis-robustness-2026-10-07.md) et [les trois protections et leur vérification](docs/progress-2026-10-07.md). Cette évolution ne démontre pas une meilleure précision angulaire.
 
 Sur un clone existant, arrêter l'application puis, depuis le dépôt :
 
@@ -16,7 +18,7 @@ git pull --ff-only origin camera-guidance-local
 git rev-parse HEAD
 ```
 
-S'il existe des modifications locales ou si Git refuse le changement/la mise à jour, les préserver et résoudre ce point avant de poursuivre : ne pas réinitialiser le dépôt. Noter le SHA affiché pour identifier exactement la version testée, puis redémarrer l'application. Détails de la livraison et limites : [avancement du 6 octobre](docs/progress-2026-10-06.md).
+S'il existe des modifications locales ou si Git refuse le changement/la mise à jour, les préserver et résoudre ce point avant de poursuivre : ne pas réinitialiser le dépôt. Noter le SHA affiché pour identifier exactement la version testée, puis redémarrer l'application. Détails de la livraison et limites : [avancement du 7 octobre](docs/progress-2026-10-07.md).
 
 ## Ce qui a été développé
 
@@ -27,9 +29,12 @@ S'il existe des modifications locales ou si Git refuse le changement/la mise à 
 - Webcam sans audio ou clip local ; images non inversées pour l'analyse, aperçu caméra miroir uniquement.
 - Repères du mouvement sélectionné et projection angulaire en direct. Cadre indicatif sur l'image, occlusion, absence de pose et plusieurs personnes entraînent un retour explicite. Un poignet masqué ne bloque pas un essai du genou.
 - Horodatage des clips à partir du temps **de la vidéo**, sans inventer de temps pour les images répétées. Une seule requête image à la fois ; caméra bloquée ou vidéo immobile : aucun nouvel échantillon.
+- Surveillance indépendante : **3 secondes sans nouvelle image source ou traitement confirmé** interrompent définitivement l'essai. Le serveur surveille aussi les trous de réception/temps source ; reprendre avec une image fraîche ne répare pas la capture. Motif « capture interrompue », valeur finale `null`, preuve supprimée. Seuil technique provisoire ; un flux d'images identiques dont les horodatages avancent n'est pas reconnu comme figé.
 - Retour retardé de plus d'une seconde : repères masqués ; anciens repères également effacés après une seconde en attendant la requête suivante. Aller-retour affiché en ms, P95 et volume JPEG dans l'export. Arrêt à deux minutes indépendant d'une requête bloquée.
 - Courbe temporelle brute, durée observée, couverture des images et aperçu de l'image du pic. Les lacunes ne sont pas interpolées.
+- Diagnostics du suivi : scores/cause par repère requis, comptes et intervalles non exploitables, contexte temporel du pic brut et variations adjacentes. Résolution de l'aperçu distinguée des JPEG réellement analysés ; instantané de provenance technique dans le JSON. Détails repliés, sans juger l'exécution du geste.
 - Export explicite du brouillon `.txt` et des données de test `.json`, sans jeton de séance ni pixels. Les exports restent **non validés**.
+- Trace de test : commit/état Git et hash d'implémentation, protocole, modèle/options/hash de pose, navigateur normalisé, réglages et libellé caméra sans identifiants persistants, serveur/alias LLM configurés. Modèle sélectionné distingué des tentatives LLM engagées ; révision des poids/runtime et FP4 réellement employé restent inconnus s'ils ne sont pas fournis. [Fiche complémentaire du premier essai](docs/test-record-template.md).
 - Assistant **pendant l'essai**, optionnel : observations techniques d'une fenêtre récente, indépendantes de la capture. Retour provisoire sur l'image avec intervalle analysé ; aucune observation live dans le compte rendu/export final.
 - Mémoire glissante serveur : **5 secondes / 25 observations / 2 JPEG maximum**. Images récentes uniquement après accord visuel explicite ; suppression des références expirées, même sans nouvelle capture. Aucun enregistrement de vidéo sur disque.
 - Une seule analyse LLM pour toute l'application, live et note finale partagent le même slot sans file d'attente. Budget total de 10 s maximum en live / 30 s pour la note, partagé entre tours et outils. Arrêt, expiration ou remplacement de séance interrompent l'attente HTTP et empêchent les réponses tardives ; cela ne garantit pas l'arrêt du calcul GPU distant.
@@ -53,7 +58,7 @@ S'il existe des modifications locales ou si Git refuse le changement/la mise à 
 | Cou · inclinaison latérale | Face | Proxy : axe des oreilles relatif à l'axe des épaules, **pas l'amplitude cervicale** |
 | Cou · rotation guidée | Face | Personnage et repères uniquement ; **aucun angle calculé** |
 
-Les calculs corrigent le rapport largeur/hauteur avant l'angle. Les nouveaux protocoles quantifiés sont toujours marqués « capture limitée » avec la réserve de non-validation, même si les repères sont tous présents. Le maximum est brut, sans filtrage ni calibration initiale. Aucun test de force, manœuvre douloureuse/provocative ou diagnostic ajouté. Voir [les conventions et limites](docs/movement-protocols.md).
+Les calculs corrigent le rapport largeur/hauteur avant l'angle. Les nouveaux protocoles quantifiés sont toujours `limited`, affichés « suivi à vérifier », avec la réserve de non-validation, même si les repères sont tous présents. Le maximum est brut, sans filtrage ni calibration initiale ; son voisinage temporel est descriptif, pas une validation. Aucun test de force, manœuvre douloureuse/provocative ou diagnostic ajouté. Voir [les conventions et limites](docs/movement-protocols.md).
 
 Le guide et le cadre sont **illustratifs** : ils ne valident pas automatiquement la posture. La direction demandée n'est pas reconnue automatiquement. Les tests serviront à mesurer et corriger les erreurs ; ils ne rendent pas automatiquement le guide précis.
 
@@ -172,8 +177,13 @@ Le socle multi-protocoles/tunnel avait **42 tests Python et 18 tests JavaScript 
 
 Livraison du **6 octobre 2026 : 158 tests Python + 56 tests JavaScript réussis, soit 214 tests**, dont 16 nouveaux tests de la note finale et trois régressions sur les délais socket Windows. Syntaxe JavaScript et diff vérifiés ; scan de 85 fichiers sans artefact interdit ni secret usuel détecté (non exhaustif). Vérifications locales sur Python 3.11.14, sans webcam, LLM ni GPU réels. Consulter [GitHub Actions pour cette branche](https://github.com/Matt95354855/kine-motion-local/actions?query=branch%3Acamera-guidance-local) et comparer le SHA testé, plutôt que réutiliser la preuve d'un ancien commit.
 
+Livraison complète du **7 octobre : 215 tests Python + 92 tests JavaScript réussis, soit 307 tests**. Syntaxe et diff vérifiés ; scan de 93 fichiers sans artefact interdit ni secret usuel détecté (non exhaustif). Les détails sont dans [le suivi du 7 octobre](docs/progress-2026-10-07.md). Les poses, médias et services de ces tests sont simulés. Aucun nouvel essai webcam, GPU, LLM réel ou connexion au Windows n'est acquis ici ; consulter la CI du SHA exact après publication.
+
 ## Suite du projet
 
+- [Protections caméra, annulation et trace de test — 7 octobre](docs/progress-2026-10-07.md)
+- [Robustesse du suivi et provenance — 7 octobre](docs/analysis-robustness-2026-10-07.md)
+- [Fiche d'essai et vérification sur Windows GPU](docs/test-record-template.md)
 - [Livraison de test et note finale sécurisée — 6 octobre](docs/progress-2026-10-06.md)
 - [Temps réel : budgets, annulation et retour court](docs/progress-2026-10-05.md)
 - [Travail réalisé et preuves](docs/progress-2026-10-02.md)
@@ -186,4 +196,4 @@ Livraison du **6 octobre 2026 : 158 tests Python + 56 tests JavaScript réussis,
 
 Pas encore de dossier patient, base de séances, correction manuelle des repères, validation professionnelle signée, comptage fiable des répétitions, catalogue d'exercices approuvé ou capture smartphone sécurisée. Ne pas publier de captures personnelles, de poids, de certificats ou de dossiers réels sur GitHub. Le choix d'une licence du projet et la revue des licences tierces restent ouverts.
 
-Avant une campagne de précision, il reste notamment à détecter une caméra silencieusement figée et à invalider sa capture incomplète, contrôler les pics parasites et compléter la provenance des exports. La durée/qualité des seules images reçues ne prouve pas que tout le mouvement a été capturé. Le premier essai Windows doit vérifier une vraie détection de personne, puis la liaison SSH et les serveurs LLM existants ; aucune de ces preuves matérielles n'est acquise par les tests automatiques.
+Avant une campagne de précision, il reste notamment à qualifier le watchdog de 3 secondes sur le matériel, les pics sur des références annotées et les versions/poids des runtimes LLM existants. Les nouveaux diagnostics et hashes ne remplacent pas ces preuves. La fraîcheur des seules images reçues ne prouve pas que tout le mouvement a été capturé, ni que leurs pixels changent. Une vraie détection de personne, la liaison SSH et l'arrêt de génération après annulation doivent être qualifiés sur le Windows ; aucune de ces preuves matérielles n'est acquise par les tests automatiques. Les poids chargés peuvent normalement rester en VRAM après l'arrêt d'une génération.

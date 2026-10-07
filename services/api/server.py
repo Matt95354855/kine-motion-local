@@ -24,6 +24,9 @@ from services.api.state import MAX_JPEG_BYTES, SessionManager
 from services.api.live import LiveHarnessCoordinator
 from services.api.inference import DRAFT_BUDGET_SECONDS, LIVE_BUDGET_SECONDS, InferenceGate
 from packages.harness.window import WINDOW_MS, MAX_SAMPLES, MAX_IMAGES
+from packages.harness.report import render_capture_diagnostics
+from services.api.provenance import analysis_provenance
+from services.api.capture_integrity import CAPTURE_WATCHDOG_TIMEOUT_MS
 
 ROOT = Path(__file__).resolve().parents[2]
 WEB = ROOT / "apps" / "web"
@@ -58,12 +61,29 @@ def make_handler(
     inference_gate: InferenceGate | None = None,
     live_budget_seconds: float = LIVE_BUDGET_SECONDS,
     draft_budget_seconds: float = DRAFT_BUDGET_SECONDS,
+    pose_model_path: str | None = None,
 ):
     bindings = model_bindings or configured_models()
     if llm_client is not None:
         bindings = {**bindings, "custom": ModelBinding("Modèle local personnalisé", llm_client, llm_vision, llm_vision)}
     gate = inference_gate if inference_gate is not None else InferenceGate()
-    coordinator = LiveHarnessCoordinator(manager, inference_gate=gate, analysis_budget_seconds=live_budget_seconds)
+    provenance = analysis_provenance(ROOT, pose_mode, pose_model_path, llm_bindings=bindings,
+                                     declared_quantization="FP4")
+    model_provenance = {item["id"]: item for item in provenance["llm_runtime"]["models"]}
+
+    def record_completion(session_id, token, model_id, kind, image_authorized, messages):
+        attached = any(
+            isinstance(message, dict) and isinstance(message.get("content"), list)
+            and any(isinstance(part, dict) and part.get("type") == "image_url" for part in message["content"])
+            for message in messages
+        )
+        manager.record_llm_completion(session_id, token, model_id, kind, model_provenance[model_id],
+                                      image_authorized, attached)
+
+    coordinator = LiveHarnessCoordinator(
+        manager, inference_gate=gate, analysis_budget_seconds=live_budget_seconds,
+        on_completion_start=lambda sid, token, model, images, messages: record_completion(
+            sid, token, model, "live", images, messages))
 
     class Handler(BaseHTTPRequestHandler):
         def setup(self) -> None:
@@ -130,10 +150,12 @@ def make_handler(
                 if path == "/api/status":
                     self._json(200, {
                         "pose_mode": pose_mode,
+                        "provenance": provenance,
                         "protocols": protocol_catalog(),
                         "topology": {"camera": "browser_client", "compute": "server", "remote_client": remote_client,
                                      "connection": "ssh_tunnel_required" if remote_client else "loopback"},
-                        "capture_limits": {"max_frames": 600, "max_jpeg_bytes": MAX_JPEG_BYTES, "sampling_interval_ms": 200},
+                        "capture_limits": {"max_frames": 600, "max_jpeg_bytes": MAX_JPEG_BYTES,
+                                           "sampling_interval_ms": 200, "watchdog_timeout_ms": CAPTURE_WATCHDOG_TIMEOUT_MS},
                         "live_harness": {"window_ms": WINDOW_MS, "max_samples": MAX_SAMPLES, "max_images": MAX_IMAGES,
                                          "poll_interval_ms": 1000, "inference_interval_ms": 3000, "result_ttl_ms": 10000},
                         "analysis_limits": {"live_budget_ms": round(live_budget_seconds * 1000),
@@ -196,6 +218,11 @@ def make_handler(
                     self._json(200, {"sequence": frame.sequence, "timestamp_ms": frame.timestamp_ms,
                                      "quality_reason": frame.quality_reason,
                                      "angle_deg": frame_angle(frame),
+                                     "analyzed_image": {"width_px": frame.width_px, "height_px": frame.height_px},
+                                     "landmark_diagnostics": {
+                                         name: asdict(frame.landmark_diagnostics[name])
+                                         for name in protocol.names(frame.side) if name in frame.landmark_diagnostics
+                                     },
                                      "pose": {"width_px": frame.width_px, "height_px": frame.height_px,
                                               "protocol_id": protocol.id,
                                               "points": [asdict(p) if p else None for p in points],
@@ -206,19 +233,30 @@ def make_handler(
                 elif path == "/api/session/finish":
                     doc = self._document()
                     session_id, token = doc.get("session_id", ""), doc.get("token", "")
+                    # Fermer le transport LLM avant d'attendre le verrou de pose.
+                    gate.cancel_session(session_id, token)
                     if not manager.get(session_id, token).active:
                         raise ValueError("Séance déjà terminée")
                     coordinator.stop(session_id, token)
                     gate.cancel_session(session_id, token)
-                    measurement = manager.finish(
-                        doc.get("session_id", ""),
-                        doc.get("token", ""),
-                        True if doc.get("view_confirmed") is True else None,
-                        True if doc.get("camera_stable_confirmed") is True else None,
-                        doc.get("stopped") is True,
-                    )
-                    self._json(200, {"measurement": asdict(measurement), "draft": render_protocol_draft(measurement),
-                                     **manager.completed_details(doc.get("session_id", ""), doc.get("token", ""))})
+                    try:
+                        measurement = manager.finish(
+                            session_id,
+                            token,
+                            True if doc.get("view_confirmed") is True else None,
+                            True if doc.get("camera_stable_confirmed") is True else None,
+                            doc.get("stopped") is True,
+                            doc.get("interruption_reason"),
+                            doc.get("capture_monitor"),
+                        )
+                    finally:
+                        # Une réservation live intercalée avant la transition
+                        # définitive doit aussi recevoir le signal d'annulation.
+                        gate.cancel_session(session_id, token)
+                    coordinator.stop(session_id, token)
+                    details = manager.completed_details(session_id, token)
+                    draft = render_protocol_draft(measurement) + "\n\n" + render_capture_diagnostics(measurement, details["motion"])
+                    self._json(200, {"measurement": asdict(measurement), "draft": draft, **details})
                 elif path == "/api/session/evidence":
                     doc = self._document()
                     measurement, keyframe = manager.completed_snapshot(doc.get("session_id", ""), doc.get("token", ""))
@@ -227,6 +265,7 @@ def make_handler(
                 elif path == "/api/session/cancel":
                     doc = self._document()
                     session_id, token = doc.get("session_id", ""), doc.get("token", "")
+                    gate.cancel_session(session_id, token)
                     coordinator.stop(session_id, token)
                     gate.cancel_session(session_id, token)
                     try:
@@ -259,6 +298,8 @@ def make_handler(
                 elif path == "/api/harness/live/stop":
                     doc = self._document()
                     session_id, token = doc.get("session_id", ""), doc.get("token", "")
+                    SessionManager._check_live_version(doc.get("control_version"))
+                    gate.cancel_session(session_id, token, max_control_version=doc.get("control_version"))
                     manager.stop_live(session_id, token, doc.get("control_version"))
                     coordinator.stop(session_id, token, control_version=doc.get("control_version"))
                     self._json(200, {"stopped": True})
@@ -294,7 +335,9 @@ def make_handler(
                         # La limite couvre tous les tours, pas seulement un appel.
                         result = run_harness(
                             context,
-                            ControlledChatClient(binding.client, control) if binding.client is not None else None,
+                            ControlledChatClient(binding.client, control, lambda messages: record_completion(
+                                session_id, token, model_id, "draft", include_image, messages))
+                            if binding.client is not None else None,
                             allow_visual_evidence=include_image,
                         )
                         # Inclure aussi les outils et la validation après le dernier tour.
@@ -310,7 +353,9 @@ def make_handler(
                         if lease is not None:
                             gate.release(lease)
                     manager.get(session_id, token)  # Refuse une réponse pour une séance révoquée entre-temps.
-                    self._json(200, {**asdict(result), "model_id": model_id, "image_sent": include_image and binding.client is not None and keyframe is not None})
+                    self._json(200, {**asdict(result), "model_id": model_id,
+                                     "llm_usage": manager.llm_usage_details(session_id, token),
+                                     "image_sent": include_image and binding.client is not None and keyframe is not None})
                 elif path == "/api/models/check":
                     doc = self._document()
                     model_id = doc.get("model_id")
@@ -387,6 +432,7 @@ def main() -> None:
             args.llm_vision,
             models,
             args.remote_client,
+            pose_model_path=None if args.demo_pose else args.pose_model,
         ),
     )
     print(f"Prototype local : http://127.0.0.1:{server.server_port}")

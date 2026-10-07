@@ -114,6 +114,8 @@ def assess_trial(trial: ElbowTrial, protocol_id: str) -> Measurement:
                            MeasurementSource.ALGORITHM, protocol.mode + "_2d_projection",
                            reasons, evidence, count, len(trial.frames))
 
+    if trial.interruption_reason is not None:
+        return result(MeasurementStatus.REJECTED, reasons=(trial.interruption_reason,))
     if trial.stopped:
         return result(MeasurementStatus.REJECTED, reasons=("stopped",))
     if not trial.frames:
@@ -175,4 +177,5 @@ def render_protocol_draft(measurement: Measurement) -> str:
                       f"Côté/direction demandé(e) : {side} ; non vérifié(e) automatiquement.", result,
                       protocol.limitation, "Limites : " + ", ".join(labels.get(r, r) for r in measurement.quality_reasons),
                       "Preuve : " + (", ".join(measurement.evidence_refs) or "aucune"),
+                      "La qualité du suivi ne juge pas la bonne exécution du geste.",
                       "Aucun diagnostic ni prescription ; revue professionnelle requise."))

@@ -49,6 +49,8 @@ def assess_elbow_trial(trial: ElbowTrial) -> Measurement:
             total_frame_count=len(trial.frames),
         )
 
+    if trial.interruption_reason is not None:
+        return result(MeasurementStatus.REJECTED, reasons=(trial.interruption_reason,))
     if trial.stopped:
         return result(MeasurementStatus.REJECTED, reasons=("stopped",))
     if not trial.frames:

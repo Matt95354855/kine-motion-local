@@ -40,6 +40,10 @@ class LocalHttpTests(unittest.TestCase):
     def test_static_app_and_local_frame_flow(self) -> None:
         with self.opener.open(self.base + "/", timeout=3) as response:
             self.assertIn("Analyse de mouvement", response.read().decode("utf-8"))
+        with self.opener.open(self.base + "/api/status", timeout=3) as response:
+            status = json.load(response)
+        self.assertEqual(status["provenance"]["pose_engine"], "synthetic_demo")
+        self.assertIsNone(status["provenance"]["pose_model"]["hash_verified"])
 
         session = self.post_json("/api/session/start", {"side": "left"})
         for index in range(3):
@@ -57,7 +61,10 @@ class LocalHttpTests(unittest.TestCase):
                 method="POST",
             )
             with self.opener.open(request, timeout=3) as response:
-                self.assertEqual(json.load(response)["sequence"], index)
+                observed = json.load(response)
+                self.assertEqual(observed["sequence"], index)
+                self.assertEqual(observed["analyzed_image"], {"width_px": 640, "height_px": 480})
+                self.assertEqual(observed["landmark_diagnostics"], {})
 
         finished = self.post_json(
             "/api/session/finish",
@@ -65,6 +72,11 @@ class LocalHttpTests(unittest.TestCase):
         )
         self.assertEqual(finished["measurement"]["status"], "valid")
         self.assertEqual(finished["motion"]["duration_ms"], 400)
+        self.assertEqual(finished["motion"]["pose_diagnostics"]["available_frame_count"], 0)
+        self.assertEqual(finished["motion"]["robustness"]["usable_frames"], 3)
+        self.assertIn("ne jugent pas l'exécution du geste", finished["draft"])
+        self.assertFalse(finished["capture_integrity"]["interrupted"])
+        self.assertEqual(finished["llm_usage"]["records"], [])
         evidence = self.post_json("/api/session/evidence", session)
         self.assertIsNotNone(evidence["jpeg_base64"])
         self.assertEqual(evidence["evidence_ref"], finished["measurement"]["evidence_refs"][0])
@@ -198,6 +210,12 @@ class LocalHttpTests(unittest.TestCase):
             self.assertIsNotNone(text_result["proposed_note"])
             self.assertIsNone(text_result["fallback_reason"])
             self.assertIsInstance(gpt.messages[0][1]["content"], str)
+            gpt_trace = text_result["llm_usage"]["records"]
+            self.assertEqual(len(gpt_trace), 1)
+            self.assertEqual(gpt_trace[0]["model_id"], "gpt_oss")
+            self.assertEqual(gpt_trace[0]["kind"], "draft")
+            self.assertEqual(gpt_trace[0]["completion_call_count"], 1)
+            self.assertFalse(gpt_trace[0]["image_payload_attached"])
 
             qwen_text = post("/api/harness/draft", {**session, "model_id": "qwen36"})
             self.assertFalse(qwen_text["image_sent"])
@@ -206,6 +224,12 @@ class LocalHttpTests(unittest.TestCase):
             self.assertTrue(qwen_visual["image_sent"])
             self.assertIsNotNone(qwen_visual["proposed_note"])
             self.assertEqual(qwen.messages[1][1]["content"][1]["type"], "image_url")
+            usage = {item["model_id"]: item for item in qwen_visual["llm_usage"]["records"]}
+            self.assertEqual(usage["qwen36"]["completion_call_count"], 2)
+            self.assertTrue(usage["qwen36"]["image_authorized"])
+            self.assertTrue(usage["qwen36"]["image_payload_attached"])
+            self.assertIsNone(usage["qwen36"]["model"]["quantization_verified"])
+            self.assertNotIn(session["token"], json.dumps(qwen_visual["llm_usage"]))
         finally:
             server.shutdown()
             server.server_close()

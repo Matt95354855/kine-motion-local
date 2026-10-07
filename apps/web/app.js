@@ -6,9 +6,14 @@ const captureCanvas = document.createElement("canvas");
 const captureContext = captureCanvas.getContext("2d");
 const controllers = new Set();
 const MAX_DURATION_MS = 120000;
+const CAPTURE_WATCHDOG_TIMEOUT_MS = 3000;
+const JPEG_QUALITY = 0.8, MAX_ANALYSIS_WIDTH_PX = 640, MAX_ANALYSIS_HEIGHT_PX = 1080;
 let phase = "idle", epoch = 0, session = null, stream = null, source = null;
 let fileUrl = null, evidenceUrl = null, timer = null, expiryTimer = null, pending = null;
 let trialDeadlineTimer = null;
+let captureWatchdog = null, captureWatchdogTimer = null, videoFrameCallbackId = null, frameController = null;
+let finishFrameTimer = null;
+let captureInterruptionReason = null, captureFreshnessBasis = "media_clock", testConfiguration = null;
 let poseExpiryTimer = null;
 let sequence = 0, startedAt = 0, clock = null, resultDocument = null, latestPose = null;
 let models = [], demo = false, llmBusy = false, serverReady = false;
@@ -34,9 +39,10 @@ let protocols = [{ id: "elbow_flexion_active", label: "Coude · flexion", view: 
   framing: "Épaule, coude et poignet visibles", guide: "elbow", side_kind: "anatomical",
   metric_label: "Flexion apparente", quantified: true, harness_supported: true }];
 let protocol = protocols[0], networkSamples = [];
+let encodedDimensions = new Map(), analyzedDimensions = new Map(), analysisProvenance = null;
 const qualityLabels = {
-  no_pose: "Personne non détectée", multiple_people: "Une seule personne dans le cadre",
-  occlusion: "Repères masqués", out_of_frame: "Repères hors du cadre",
+  no_pose: "Suivi non obtenu", multiple_people: "Plusieurs poses détectées",
+  occlusion: "Repères non fiables", out_of_frame: "Repères hors du cadre",
   degenerate_landmarks: "Repères insuffisants",
 };
 function message(error) {
@@ -78,10 +84,187 @@ function controls() {
     !readyModels.has(selected.id) || !["idle", "ready", "recording"].includes(phase);
   $("live-assistant-controls").hidden = !liveAssistantEligible();
   $("live-assistant-pause").disabled = !liveAssistantEligible();
+  const missingView = !$("view-confirmed").checked, missingStable = !$("stable-confirmed").checked;
+  $("capture-check-reminder").hidden = phase !== "ready" || !(missingView || missingStable);
+  writeText("capture-check-reminder", `À confirmer : ${missingView && missingStable ? "vue et caméra stable" : missingView ? "vue" : "caméra stable"}`);
 }
 function setPhase(value) { phase = value; controls(); }
 function writeText(id, value) {
   if ($(id).textContent !== value) $(id).textContent = value;
+}
+function positivePixel(value) { return Number.isInteger(value) && value > 0 && value <= 16384; }
+function recordDimensions(target, width, height) {
+  if (!positivePixel(width) || !positivePixel(height)) return;
+  const key = `${width}x${height}`, previous = target.get(key);
+  target.set(key, { width_px: width, height_px: height, frame_count: (previous?.frame_count || 0) + 1 });
+}
+function safeModelDescriptor(value) {
+  if (!value || typeof value !== "object" || typeof value.id !== "string" || !/^[A-Za-z0-9_.-]{1,64}$/.test(value.id)) return null;
+  const text = (item, maximum = 256) => typeof item === "string" && item.length > 0 && item.length <= maximum &&
+    !/[\p{C}]/u.test(item) ? item : null;
+  const alias = text(value.model_alias);
+  const boolean = (item) => typeof item === "boolean" ? item : null;
+  return { id: value.id, label: text(value.label, 128), configured: boolean(value.configured),
+    model_alias: alias && !/^(?:[\/\\~]|\.\.?[\/\\]|[A-Za-z]:[\/\\]|Bearer\s|Basic\s)|[\\?#]|:\/\/|\b(?:api[_-]?key|token|password|secret)\s*[=:]/i.test(alias) &&
+      !(alias.includes("@") && alias.split("@", 1)[0].includes(":")) ? alias : null,
+    endpoint: typeof value.endpoint === "string" && /^http:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d{1,5})?\/v1\/?$/.test(value.endpoint) ? value.endpoint : null,
+    api_style: value.api_style === "openai_compatible_chat_completions" ? value.api_style : null,
+    vision_supported: boolean(value.vision_supported), vision_enabled: boolean(value.vision_enabled),
+    model_revision: text(value.model_revision), runtime_version: text(value.runtime_version, 64),
+    configured_quantization: text(value.configured_quantization, 32),
+    declared_quantization_choice: value.declared_quantization_choice === "FP4" ? "FP4" : null,
+    quantization_verified: boolean(value.quantization_verified) };
+}
+function safeLLMUsage(value) {
+  if (value?.schema_version !== "1.0" || value.meaning !== "completion_attempts_started_not_proof_of_network_success_or_gpu_release" ||
+    !Array.isArray(value.records) || value.records.length > 6) return null;
+  const records = [];
+  for (const item of value.records) {
+    if (!item || typeof item.model_id !== "string" || !/^[A-Za-z0-9_.-]{1,64}$/.test(item.model_id) || !["live", "draft"].includes(item.kind) ||
+      !Number.isSafeInteger(item.completion_call_count) || item.completion_call_count < 1 ||
+      !Number.isFinite(item.first_call_elapsed_ms) || item.first_call_elapsed_ms < 0 ||
+      !Number.isFinite(item.last_call_elapsed_ms) || item.last_call_elapsed_ms < item.first_call_elapsed_ms) return null;
+    records.push({ model_id: item.model_id, kind: item.kind, completion_call_count: item.completion_call_count,
+      first_call_elapsed_ms: item.first_call_elapsed_ms, last_call_elapsed_ms: item.last_call_elapsed_ms,
+      image_authorized: item.image_authorized === true, image_payload_attached: item.image_payload_attached === true,
+      model: safeModelDescriptor(item.model) });
+  }
+  return { schema_version: "1.0", meaning: value.meaning, records };
+}
+function safeCaptureIntegrity(value) {
+  if (value?.schema_version !== "1.0") return null;
+  const result = { schema_version: "1.0", watchdog_timeout_ms: value.watchdog_timeout_ms === 3000 ? 3000 : null,
+    interrupted: value.interrupted === true, reason: value.reason === "capture_interrupted" ? value.reason : null,
+    limitation: value.limitation === "fresh_received_frames_do_not_prove_complete_motion_or_pixel_changes" ? value.limitation : null };
+  for (const key of ["server_observed_duration_ms", "received_frame_count", "max_receive_gap_ms", "max_source_gap_ms",
+    "last_received_age_ms", "source_span_ms"]) result[key] = Number.isFinite(value[key]) && value[key] >= 0 ? value[key] : null;
+  const monitor = value.client_monitor;
+  result.client_monitor = monitor?.schema_version === "1.0" && monitor.watchdog_timeout_ms === 3000 &&
+    Number.isFinite(monitor.expected_duration_ms) && monitor.expected_duration_ms >= 0 && monitor.expected_duration_ms <= 135000 &&
+    (monitor.last_frame_elapsed_ms === null || Number.isFinite(monitor.last_frame_elapsed_ms) && monitor.last_frame_elapsed_ms >= 0 &&
+      monitor.last_frame_elapsed_ms <= monitor.expected_duration_ms) ? {
+      schema_version: "1.0", watchdog_timeout_ms: 3000, expected_duration_ms: monitor.expected_duration_ms,
+      last_frame_elapsed_ms: monitor.last_frame_elapsed_ms, interrupted: monitor.interrupted === true } : null;
+  return result;
+}
+function cameraTrace() {
+  if (source?.type !== "camera") return null;
+  const track = stream?.getVideoTracks()[0], settings = track?.getSettings() || {};
+  const label = typeof track?.label === "string" ? track.label.replace(/[\u0000-\u001f\u007f]/g, "").slice(0, 160) : null;
+  return { label: label || null, settings: { width: positivePixel(settings.width) ? settings.width : null,
+    height: positivePixel(settings.height) ? settings.height : null,
+    frameRate: Number.isFinite(settings.frameRate) && settings.frameRate > 0 && settings.frameRate <= 1000 ? settings.frameRate : null,
+    facingMode: ["user", "environment", "left", "right"].includes(settings.facingMode) ? settings.facingMode : null,
+    resizeMode: ["none", "crop-and-scale"].includes(settings.resizeMode) ? settings.resizeMode : null } };
+}
+function trialConfiguration() {
+  const selected = models.find((item) => item.id === $("llm-model").value);
+  const configured = analysisProvenance?.llm_runtime?.models.find((item) => item.id === selected?.id);
+  return { browser: KineCapture.browserTrace(navigator.userAgent, navigator.platform), camera: cameraTrace(),
+    selected_model_at_start: selected ? { model_id: selected.id, configuration: configured || null, declared_only: true } : null };
+}
+function safeProvenance(value) {
+  if (!value || typeof value !== "object" || value.schema_version !== "1.0") return null;
+  const digest = (item, length) => typeof item === "string" && new RegExp(`^[a-f0-9]{${length}}$`, "i").test(item) ? item : null;
+  const version = (item) => typeof item === "string" && /^[a-zA-Z0-9.+_-]{1,64}$/.test(item) ? item : null;
+  const boolean = (item) => typeof item === "boolean" ? item : null;
+  let poseSettings = null;
+  if (value.pose_settings && typeof value.pose_settings === "object") {
+    const settings = value.pose_settings;
+    poseSettings = { delegate: settings.delegate === "CPU" ? "CPU" : null,
+      running_mode: ["VIDEO", "synthetic"].includes(settings.running_mode) ? settings.running_mode : null,
+      num_poses: Number.isInteger(settings.num_poses) && settings.num_poses >= 1 && settings.num_poses <= 10 ? settings.num_poses : null,
+      output_segmentation_masks: boolean(settings.output_segmentation_masks) };
+    for (const key of ["min_pose_detection_confidence", "min_pose_presence_confidence", "min_tracking_confidence",
+      "landmark_visibility_threshold", "landmark_presence_threshold"]) {
+      poseSettings[key] = Number.isFinite(settings[key]) && settings[key] >= 0 && settings[key] <= 1 ? settings[key] : null;
+    }
+  }
+  return { schema_version: "1.0", snapshot: value.snapshot === "server_startup" ? value.snapshot : null,
+    git_commit: digest(value.git_commit, 40), working_tree_dirty: boolean(value.working_tree_dirty),
+    implementation_sha256: digest(value.implementation_sha256, 64),
+    implementation_hash_scope: ["pose_geometry_capture_contracts_report", "pose_geometry_capture_contracts_report_harness_transport_lifecycle"].includes(value.implementation_hash_scope) ? value.implementation_hash_scope : null,
+    python_version: version(value.python_version),
+    pose_engine: ["mediapipe_experimental", "synthetic_demo", "unknown"].includes(value.pose_engine) ? value.pose_engine : "unknown",
+    pose_package_version: version(value.pose_package_version),
+    pose_model: { sha256: digest(value.pose_model?.sha256, 64), configured_sha256: digest(value.pose_model?.configured_sha256, 64),
+      hash_verified: boolean(value.pose_model?.hash_verified) }, pose_settings: poseSettings,
+    llm_runtime: value.llm_runtime?.schema_version === "1.0" && Array.isArray(value.llm_runtime.models) ? {
+      schema_version: "1.0", snapshot: value.llm_runtime.snapshot === "server_startup_configuration" ? value.llm_runtime.snapshot : null,
+      models: value.llm_runtime.models.slice(0, 3).map(safeModelDescriptor).filter(Boolean) } : null };
+}
+function captureMetadata(motion) {
+  const serverDimensions = motion.robustness?.analyzed_image_dimensions;
+  const dimensionsValid = serverDimensions && [serverDimensions.min_width_px, serverDimensions.max_width_px,
+    serverDimensions.min_height_px, serverDimensions.max_height_px].every(positivePixel);
+  const confirmedCount = [...analyzedDimensions.values()].reduce((total, item) => total + item.frame_count, 0);
+  return { jpeg_quality: JPEG_QUALITY, max_width_px: MAX_ANALYSIS_WIDTH_PX, max_height_px: MAX_ANALYSIS_HEIGHT_PX,
+    sampling_interval_ms: limits.sampling_interval_ms, encoded_dimensions: [...encodedDimensions.values()],
+    analyzed_dimensions: [...analyzedDimensions.values()],
+    analyzed_image_dimensions: dimensionsValid ? { min_width_px: serverDimensions.min_width_px, max_width_px: serverDimensions.max_width_px,
+      min_height_px: serverDimensions.min_height_px, max_height_px: serverDimensions.max_height_px } : null,
+    server_dimensions_source: dimensionsValid ? "motion_robustness" : confirmedCount ? "frame_response" : "unavailable",
+    unconfirmed_frame_dimensions_count: Math.max(0, networkSamples.length - confirmedCount), freshness_basis: captureFreshnessBasis };
+}
+function showResultDiagnostics(measurement, motion, stopped) {
+  const robustness = motion.robustness;
+  const peakContexts = { isolated: "Pic brut isolé", before_only: "Pic brut · voisinage partiel",
+    after_only: "Pic brut · voisinage partiel", before_and_after: "Pic brut · voisins temporels présents" };
+  const knownRobustness = robustness?.schema_version === "1.0";
+  const peak = knownRobustness ? robustness.raw_peak : null;
+  const peakLabel = typeof peak?.temporal_context === "string" && Object.hasOwn(peakContexts, peak.temporal_context) ? peakContexts[peak.temporal_context] : null;
+  const rejected = stopped || measurement.status === "rejected";
+  let diagnostic = !protocol.quantified ? "Guide seul · sans amplitude mesurée" : demo ? "Simulation · données brutes" :
+    rejected ? "Essai non exploitable · données brutes" :
+    measurement.status === "limited" || robustness?.unusable_frames > 0 ? "Suivi à vérifier" : "Suivi expérimental";
+  if (protocol.quantified && peakLabel) diagnostic += ` · ${peakLabel.toLocaleLowerCase("fr")}`;
+  writeText("result-diagnostic", diagnostic);
+  $("result-diagnostic").hidden = false;
+  writeText("chart-caption-label", rejected ? "Courbe brute · données non validées" : "Courbe brute · projection 2D à vérifier");
+  const capture = resultDocument.analysis_capture;
+  const formatDimensions = (items) => items.length ? items.map((item) => `${item.width_px} × ${item.height_px} (${item.frame_count} images)`).join(", ") : "non disponibles";
+  const lines = ["Diagnostic technique du suivi, pas une évaluation du geste.",
+    `Aperçu source : ${source.width_px} × ${source.height_px}. JPEG transmis : ${formatDimensions(capture.encoded_dimensions)}.`,
+    `Compression JPEG : ${JPEG_QUALITY} · intervalle demandé : ${limits.sampling_interval_ms} ms. La cadence réelle peut être plus lente.`];
+  if (capture.analyzed_image_dimensions) {
+    const dims = capture.analyzed_image_dimensions;
+    lines.push(`Images analysées (serveur) : largeur ${dims.min_width_px}–${dims.max_width_px} px, hauteur ${dims.min_height_px}–${dims.max_height_px} px.`);
+  } else lines.push(`Dimensions confirmées par le serveur : ${formatDimensions(capture.analyzed_dimensions)}.`);
+  if (!knownRobustness) lines.push("Diagnostic détaillé non fourni par ce serveur.");
+  else {
+    const count = (value) => Number.isInteger(value) && value >= 0 ? value : "non disponible";
+    if (!protocol.quantified || robustness.quantified_protocol === false && robustness.nonquantified_frames > 0)
+      lines.push(`Guide seul : ${count(robustness.nonquantified_frames)} images non quantifiées, sans calcul d’amplitude.`);
+    else lines.push(`Suivi exploitable : ${count(robustness.usable_frames)} images · non exploitable : ${count(robustness.unusable_frames)} images.`);
+    const reasons = Object.entries(qualityLabels).filter(([key]) => Number.isInteger(robustness.invalid_reason_counts?.[key]) && robustness.invalid_reason_counts[key] > 0)
+      .map(([key, label]) => `${label} : ${robustness.invalid_reason_counts[key]}`);
+    if (reasons.length) lines.push(`Motifs techniques : ${reasons.join(" · ")}.`);
+    if (Number.isFinite(robustness.longest_invalid_observed_duration_ms) && robustness.longest_invalid_observed_duration_ms >= 0)
+      lines.push(`Plus longue séquence d’images non exploitables reçues : ${(robustness.longest_invalid_observed_duration_ms / 1000).toFixed(1)} s. Ce n’est pas la durée d’une perte caméra.`);
+    if (Number.isFinite(robustness.max_adjacent_sample_gap_ms) && robustness.max_adjacent_sample_gap_ms >= 0)
+      lines.push(`Écart maximal entre images reçues : ${robustness.max_adjacent_sample_gap_ms} ms.`);
+    const angleChange = robustness.largest_adjacent_angle_change;
+    if (Number.isFinite(angleChange?.delta_deg) && Number.isFinite(angleChange.gap_ms) && angleChange.gap_ms > 0)
+      lines.push(`Écart angulaire brut maximal entre images voisines : ${angleChange.delta_deg > 0 ? "+" : ""}${angleChange.delta_deg.toFixed(1)}° en ${angleChange.gap_ms} ms. Aucun seuil de qualité déduit.`);
+    if (peakLabel) lines.push(`${peakLabel}. Les voisins temporels ne valident ni la précision ni le pic.`);
+    if (robustness.timestamps_strictly_increasing === false) lines.push("Ordre temporel des images à vérifier.");
+  }
+  lines.push(!protocol.quantified ? "Guide seul : aucun angle ni pic mesuré." :
+    rejected ? "Essai refusé : courbe et pic éventuel sont uniquement des diagnostics bruts, pas un résultat validé." :
+    "Angle et image du pic sont bruts : aucun filtre temporel ni validation de précision.");
+  if (analysisProvenance) lines.push(`Versions au démarrage serveur : ${analysisProvenance.pose_engine} · Python ${analysisProvenance.python_version || "non fourni"} · moteur ${analysisProvenance.pose_package_version || "non fourni"}.`,
+    `Révision : ${analysisProvenance.git_commit || "non fournie"}${analysisProvenance.working_tree_dirty === true ? " · modifications locales présentes" : ""}.`);
+  else lines.push("Versions et configuration du serveur non fournies.");
+  const configuration = resultDocument.test_configuration;
+  if (configuration?.browser) lines.push(`Navigateur : ${configuration.browser.family} ${configuration.browser.version || "version inconnue"} · ${configuration.browser.platform_family}.`);
+  if (configuration?.camera) lines.push(`Caméra : ${configuration.camera.label || "nom non fourni"} · ${configuration.camera.settings.width || "?"} × ${configuration.camera.settings.height || "?"} · ${configuration.camera.settings.frameRate || "?"} images/s annoncées par le navigateur.`);
+  if (configuration?.selected_model_at_start) lines.push(`Modèle choisi au démarrage : ${configuration.selected_model_at_start.model_id}. Ce choix ne prouve pas un appel LLM.`);
+  if (resultDocument.capture_monitor?.interrupted || resultDocument.capture_integrity?.interrupted) lines.push("Capture interrompue : la fraîcheur des images reçues n’a pas été maintenue. Nouvel essai requis.");
+  if (resultDocument.llm_usage === null) lines.push("Provenance des appels LLM non fournie par le serveur.");
+  else if (!resultDocument.llm_usage.records.length) lines.push("Aucune tentative de génération LLM commencée sur cet essai, selon le serveur.");
+  else for (const item of resultDocument.llm_usage.records) lines.push(`Tentatives LLM commencées : ${item.model_id} · ${item.kind === "live" ? "pendant l’essai" : "note finale"} · ${item.completion_call_count}. Ni émission réseau, ni succès du calcul, ni libération GPU prouvés.`);
+  writeText("result-technical-details", lines.join("\n"));
+  $("result-technical").open = false;
 }
 function announceLive(value) {
   if (lastLiveAnnouncement === value) return;
@@ -209,7 +392,36 @@ function startLiveAssistant() {
   void pollLiveAssistant();
   liveTimer = setInterval(pollLiveAssistant, liveHarnessLimits.poll_interval_ms);
 }
+function fileEndedNormally() {
+  return source?.type === "file" && !preview.error && (preview.ended === true ||
+    Number.isFinite(preview.duration) && preview.currentTime >= preview.duration);
+}
+function clearCaptureWatchdogTimers() {
+  clearInterval(captureWatchdogTimer); captureWatchdogTimer = null;
+  if (videoFrameCallbackId !== null) preview.cancelVideoFrameCallback?.(videoFrameCallbackId);
+  videoFrameCallbackId = null;
+}
+function checkCaptureWatchdog() {
+  if (phase !== "recording" || !captureWatchdog || fileEndedNormally()) return;
+  if (captureFreshnessBasis === "media_clock") captureWatchdog.observe(preview.currentTime, preview.readyState, performance.now());
+  if (captureWatchdog.check(performance.now())) void finishSession(true, "capture_interrupted");
+}
+function startCaptureWatchdog() {
+  const operation = epoch, currentWatchdog = captureWatchdog;
+  captureFreshnessBasis = typeof preview.requestVideoFrameCallback === "function" ? "video_frame_callback" : "media_clock";
+  if (captureFreshnessBasis === "video_frame_callback") {
+    const observeFrame = (now, metadata) => {
+      videoFrameCallbackId = null;
+      if (operation !== epoch || phase !== "recording" || captureWatchdog !== currentWatchdog) return;
+      currentWatchdog.observe(metadata.mediaTime, preview.readyState, performance.now());
+      videoFrameCallbackId = preview.requestVideoFrameCallback(observeFrame);
+    };
+    videoFrameCallbackId = preview.requestVideoFrameCallback(observeFrame);
+  } else currentWatchdog.observe(preview.currentTime, preview.readyState, performance.now());
+  captureWatchdogTimer = setInterval(checkCaptureWatchdog, 100);
+}
 function releaseMedia() {
+  clearCaptureWatchdogTimers();
   clearInterval(timer); timer = null;
   clearTimeout(trialDeadlineTimer); trialDeadlineTimer = null;
   clearTimeout(poseExpiryTimer); poseExpiryTimer = null;
@@ -223,11 +435,14 @@ function releaseMedia() {
 function clearResults() {
   resultDocument = null; latestPose = null;
   networkSamples = [];
+  encodedDimensions.clear(); analyzedDimensions.clear();
   if (evidenceUrl) URL.revokeObjectURL(evidenceUrl);
   evidenceUrl = null;
   $("evidence").removeAttribute("src"); $("evidence").hidden = true;
   $("results").hidden = true;
   $("draft").textContent = $("llm-note").textContent = $("llm-status").textContent = "";
+  writeText("result-diagnostic", ""); writeText("result-technical-details", "");
+  $("result-diagnostic").hidden = true; $("result-technical").open = false;
   $("export-report").disabled = $("export-json").disabled = true;
   KineGuide.drawPose($("pose-overlay"), null, false);
 }
@@ -238,6 +453,8 @@ function resetLocalCapture() {
   controllers.forEach((controller) => controller.abort());
   controllers.clear();
   pending = null; livePending = null;
+  clearTimeout(finishFrameTimer); finishFrameTimer = null;
+  frameController = null; captureWatchdog = null; captureInterruptionReason = null; testConfiguration = null;
   sequence = 0; startedAt = 0; clock = null;
   clearTimeout(expiryTimer); expiryTimer = null;
   releaseMedia(); clearResults();
@@ -291,7 +508,7 @@ async function prepare(sourceType, file = null) {
       preview.classList.add("mirrored");
       stream.getVideoTracks()[0].onended = () => {
         $("capture-details").textContent = "Caméra déconnectée — essai interrompu";
-        if (phase === "recording") finishSession(true); else cancelSession();
+        if (phase === "recording") finishSession(true, "capture_interrupted"); else cancelSession();
       };
       await preview.play(); await waitForVideo();
       if (operation !== epoch) return;
@@ -319,7 +536,7 @@ async function prepare(sourceType, file = null) {
     $("capture-badge").textContent = sourceType === "camera" ? "Caméra prête" : "Vidéo prête";
     $("capture-details").textContent = `${source.width_px} × ${source.height_px} · ${sourceType === "camera" ? "aperçu miroir, analyse non inversée" : "lecture à vitesse normale"}`;
     $("live-feedback").textContent = "Vérifiez le cadrage, puis démarrez l’essai";
-    preview.onerror = () => { $("capture-details").textContent = "Lecture interrompue"; if (phase === "recording") finishSession(true); else cancelSession(); };
+    preview.onerror = () => { $("capture-details").textContent = "Lecture interrompue"; if (phase === "recording") finishSession(true, "capture_interrupted"); else cancelSession(); };
     setPhase("ready");
   } catch (error) {
     if (operation !== epoch) return;
@@ -328,30 +545,42 @@ async function prepare(sourceType, file = null) {
   }
 }
 function jpegBlob() {
-  return new Promise((resolve, reject) => captureCanvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error("Image indisponible")), "image/jpeg", 0.8));
+  return new Promise((resolve, reject) => captureCanvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error("Image indisponible")), "image/jpeg", JPEG_QUALITY));
 }
 async function sampleFrame() {
+  checkCaptureWatchdog();
   if (phase !== "recording" || pending || preview.readyState < 2 || !session) return;
   const operation = epoch, currentSession = session;
   const capturedAt = performance.now();
   if (sequence >= limits.max_frames || performance.now() - startedAt >= MAX_DURATION_MS) { finishSession(false); return; }
   const timestamp = clock.next(preview.currentTime, performance.now());
   if (timestamp === null) return;
-  const scale = Math.min(1, 640 / preview.videoWidth, 1080 / preview.videoHeight);
+  const scale = Math.min(1, MAX_ANALYSIS_WIDTH_PX / preview.videoWidth, MAX_ANALYSIS_HEIGHT_PX / preview.videoHeight);
   captureCanvas.width = Math.max(1, Math.round(preview.videoWidth * scale));
   captureCanvas.height = Math.max(1, Math.round(preview.videoHeight * scale));
   captureContext.drawImage(preview, 0, 0, captureCanvas.width, captureCanvas.height);
+  const encodedWidth = captureCanvas.width, encodedHeight = captureCanvas.height;
   const currentSequence = sequence++;
+  const controller = new AbortController(); frameController = controller;
   const task = (async () => {
     const blob = await jpegBlob();
-    if (operation !== epoch) return;
+    if (operation !== epoch || captureInterruptionReason) return;
     const response = await request("/api/frame", { method: "POST", headers: {
       "Content-Type": "image/jpeg", "X-Session-Id": currentSession.session_id,
       "X-Session-Token": currentSession.token, "X-Sequence": String(currentSequence), "X-Timestamp-Ms": String(timestamp),
-    }, body: blob });
-    if (operation !== epoch) return;
+    }, body: blob }, 15000, controller);
+    if (operation !== epoch || captureInterruptionReason) return;
+    if (response.quality_reason === "capture_interrupted") {
+      // Le verdict serveur est souverain, même si l'horloge du navigateur avance.
+      void finishSession(true, "capture_interrupted");
+      return;
+    }
+    captureWatchdog?.acknowledge(capturedAt, performance.now());
     const latencyMs = Math.round(performance.now() - capturedAt);
     networkSamples.push({ sequence: currentSequence, roundtrip_ms: latencyMs, jpeg_bytes: blob.size });
+    recordDimensions(encodedDimensions, encodedWidth, encodedHeight);
+    const analyzedImage = response.analyzed_image || response.pose;
+    recordDimensions(analyzedDimensions, analyzedImage?.width_px, analyzedImage?.height_px);
     if (phase !== "recording") return;
     const delayed = latencyMs > 1000;
     latestPose = response.quality_reason || delayed ? null : response.pose;
@@ -376,8 +605,14 @@ async function sampleFrame() {
   pending = task;
   try { await task; }
   catch (error) {
-    if (operation === epoch) { await cancelSession(); $("capture-details").textContent = `Essai interrompu : ${message(error)}`; }
-  } finally { if (pending === task) pending = null; }
+    if (operation === epoch && phase === "recording") {
+      void finishSession(true, "capture_interrupted");
+      $("capture-details").textContent = `Capture interrompue : ${message(error)}`;
+    }
+  } finally {
+    if (pending === task) pending = null;
+    if (frameController === controller) frameController = null;
+  }
 }
 async function startTrial() {
   if (phase !== "ready") return;
@@ -390,35 +625,81 @@ async function startTrial() {
     }
     session = created; sequence = 0; startedAt = performance.now();
     clock = new KineCapture.CaptureClock(source.type, startedAt);
+    captureWatchdog = new KineCapture.CaptureWatchdog(startedAt, CAPTURE_WATCHDOG_TIMEOUT_MS);
+    captureInterruptionReason = null; testConfiguration = trialConfiguration();
     expiryTimer = setTimeout(() => { cancelSession(); $("capture-details").textContent = "Séance expirée : données effacées"; }, 15 * 60 * 1000);
     setPhase("recording");
+    startCaptureWatchdog();
     trialDeadlineTimer = setTimeout(() => finishSession(false), MAX_DURATION_MS);
     $("capture-badge").textContent = demo ? "Essai simulé" : "Suivi caméra";
+    await preview.play();
+    if (operation !== epoch || phase !== "recording") return;
     await sampleFrame();
     if (operation !== epoch || phase !== "recording") return;
-    await preview.play();
     timer = setInterval(sampleFrame, limits.sampling_interval_ms);
   } catch (error) {
-    if (operation === epoch) { await cancelSession(); $("capture-details").textContent = message(error); }
+    if (operation === epoch && ["starting", "recording"].includes(phase) && !captureInterruptionReason) {
+      await cancelSession(); $("capture-details").textContent = message(error);
+    }
   }
 }
-async function finishSession(stopped) {
+async function finishSession(stopped, interruptionReason = null) {
   if (phase !== "recording" || !session) return;
   const operation = epoch, currentSession = session;
   const waiting = pending;
+  const finishedAt = performance.now(), normalEOF = fileEndedNormally();
+  if (!normalEOF && captureWatchdog) {
+    if (captureFreshnessBasis === "media_clock") captureWatchdog.observe(preview.currentTime, preview.readyState, finishedAt);
+    if (captureWatchdog.check(finishedAt)) interruptionReason = "capture_interrupted";
+  }
+  if (interruptionReason === "capture_interrupted") {
+    stopped = true; captureInterruptionReason = interruptionReason;
+    if (captureWatchdog) captureWatchdog.interrupted = true;
+    frameController?.abort();
+  }
   stopLiveAssistant();
   setPhase("finishing");
   // L'arrêt des pistes ne dépend pas du temps de réponse de l'analyse.
   releaseMedia();
   $("capture-badge").textContent = stopped ? "Essai interrompu" : "Calcul du résultat";
   try {
-    if (waiting) await waiting;
+    if (waiting && !captureInterruptionReason) {
+      const remainingAckBudget = Math.max(0, CAPTURE_WATCHDOG_TIMEOUT_MS - (finishedAt - captureWatchdog.lastAcknowledgedAt));
+      let ownFinishTimer = null;
+      try {
+        const timedOut = await Promise.race([waiting.then(() => false), new Promise((resolve) => {
+          ownFinishTimer = setTimeout(() => resolve(true), remainingAckBudget); finishFrameTimer = ownFinishTimer;
+        })]);
+        if (timedOut) throw new Error("capture_interrupted");
+      } catch {
+        if (operation !== epoch) return;
+        stopped = true; captureInterruptionReason = "capture_interrupted";
+        captureWatchdog.interrupted = true; frameController?.abort();
+      } finally {
+        clearTimeout(ownFinishTimer);
+        if (finishFrameTimer === ownFinishTimer) finishFrameTimer = null;
+      }
+    }
     if (operation !== epoch) return;
+    const captureMonitor = captureWatchdog?.snapshot(finishedAt) || null;
     const response = await jsonPost("/api/session/finish", { ...currentSession,
-      view_confirmed: $("view-confirmed").checked, camera_stable_confirmed: $("stable-confirmed").checked, stopped });
+      view_confirmed: $("view-confirmed").checked, camera_stable_confirmed: $("stable-confirmed").checked, stopped,
+      interruption_reason: captureInterruptionReason, capture_monitor: captureMonitor });
     if (operation !== epoch) return;
+    const integrity = safeCaptureIntegrity(response.capture_integrity);
+    if (integrity?.interrupted) { stopped = true; captureInterruptionReason = "capture_interrupted"; }
+    if (captureInterruptionReason) {
+      if (response.measurement.value_deg !== null || response.measurement.status !== "rejected")
+        response.draft = "BROUILLON NON VALIDÉ\nCapture interrompue : aucune valeur publiée. Nouvel essai requis.";
+      response.measurement = { ...response.measurement, status: "rejected", value_deg: null,
+        quality_reasons: [...new Set([...(Array.isArray(response.measurement.quality_reasons) ? response.measurement.quality_reasons : []), "capture_interrupted"])] };
+      response.evidence_sequence = response.evidence_timestamp_ms = null;
+    }
     const sortedLatency = networkSamples.map((sample) => sample.roundtrip_ms).sort((a, b) => a - b);
-    resultDocument = { schema_version: "1.1", capture_version: "0.4.0-dev", mode: demo ? "synthetic_demo" : "mediapipe_experimental", source,
+    resultDocument = { schema_version: "1.2", capture_version: "0.5.0-dev", mode: demo ? "synthetic_demo" : "mediapipe_experimental", source,
+      analysis_capture: captureMetadata(response.motion), analysis_provenance: analysisProvenance,
+      test_configuration: { ...testConfiguration, capture_observed_duration_ms: Math.round(Math.max(0, finishedAt - startedAt)) },
+      capture_monitor: captureMonitor, capture_integrity: integrity, llm_usage: safeLLMUsage(response.llm_usage),
       protocol: { ...protocol }, network: { processed_requests: networkSamples.length,
         total_jpeg_bytes: networkSamples.reduce((total, sample) => total + sample.jpeg_bytes, 0),
         roundtrip_p95_ms: sortedLatency.length ? sortedLatency[Math.ceil(sortedLatency.length * 0.95) - 1] : null },
@@ -426,16 +707,18 @@ async function finishSession(stopped) {
       evidence_timestamp_ms: response.evidence_timestamp_ms, professional_validation: false };
     const measurement = response.measurement, motion = response.motion;
     $("results").hidden = false;
-    $("metric-label").textContent = protocol.metric_label;
+    $("metric-label").textContent = protocol.quantified ? "Pic brut · 2D" : protocol.metric_label;
+    $("metric-label").title = protocol.metric_label;
     $("chart-wrap").hidden = !protocol.quantified;
     $("angle-result").textContent = measurement.value_deg === null ? "—" : `${measurement.value_deg.toFixed(1)}°${demo ? " · simulé" : ""}`;
     $("duration-result").textContent = `${(motion.duration_ms / 1000).toFixed(1)} s`;
     $("coverage-result").textContent = protocol.quantified ? `${measurement.valid_frame_count} / ${measurement.total_frame_count}` : "Non quantifié";
     $("measurement-status").textContent = stopped ? "Essai interrompu" : !protocol.quantified ? "Guide seul · sans mesure" : demo ? "Simulation — non clinique" :
-      ({ valid: "Expérimental — à vérifier", limited: "Capture limitée", rejected: "Essai non exploitable", not_performed: "Non réalisé" })[measurement.status];
+      ({ valid: "Expérimental — à vérifier", limited: "Suivi à vérifier", rejected: "Essai non exploitable", not_performed: "Non réalisé" })[measurement.status];
     $("draft").textContent = (demo ? "SIMULATION : les pixels ne sont pas analysés.\n\n" : "") + response.draft;
-    $("evidence-label").textContent = response.evidence_timestamp_ms === null ? "Aucune image probante" :
-      `Image du pic · ${(response.evidence_timestamp_ms / 1000).toFixed(1)} s`;
+    $("evidence-label").textContent = response.evidence_timestamp_ms === null ? "Aucune image du pic brut" :
+      `Image du pic brut · ${(response.evidence_timestamp_ms / 1000).toFixed(1)} s`;
+    showResultDiagnostics(measurement, motion, stopped);
     KineGuide.drawPose($("pose-overlay"), null, false);
     KineGuide.drawChart($("angle-chart"), motion.samples);
     $("export-report").disabled = $("export-json").disabled = false;
@@ -443,8 +726,10 @@ async function finishSession(stopped) {
     $("live-feedback").textContent = stopped ? "Essai interrompu · aucune valeur publiée" : measurement.value_deg === null ?
       (!protocol.quantified ? "Rotation guidée terminée · aucune amplitude mesurée" : "Mesure non disponible — consultez les limites") : "Résultat expérimental, à vérifier";
     $("frame-status").textContent = `${motion.processing_rate_hz} images/s · ${motion.processed_frames} traitées`;
-    $("capture-details").textContent = "Caméra arrêtée · une seule image de preuve en mémoire, effacée au nouvel essai";
+    $("capture-details").textContent = captureInterruptionReason ? "Capture interrompue · nouvel essai requis" :
+      "Caméra arrêtée · image du pic brut effacée au nouvel essai";
     setPhase("completed");
+    if (captureInterruptionReason) { $("empty-state").hidden = false; return; }
     const evidence = await jsonPost("/api/session/evidence", currentSession);
     if (operation !== epoch) return;
     if (evidence.jpeg_base64) {
@@ -495,6 +780,7 @@ $("camera-start").addEventListener("click", () => prepare("camera"));
 $("video-file").addEventListener("change", () => { const file = $("video-file").files[0]; $("video-file").value = ""; if (file) prepare("file", file); });
 $("camera-device").addEventListener("change", () => { if (source?.type === "camera") prepare("camera"); });
 $("record").addEventListener("click", startTrial);
+for (const id of ["view-confirmed", "stable-confirmed"]) $(id).addEventListener("change", controls);
 $("finish").addEventListener("click", () => finishSession(false));
 $("stop").addEventListener("click", () => { if (phase === "recording") finishSession(true); else cancelSession(); });
 $("restart").addEventListener("click", () => { cancelSession(); $("capture-details").textContent = "Prêt pour un nouvel essai"; $("frame-status").textContent = "Aucune image analysée"; });
@@ -502,6 +788,7 @@ $("side").addEventListener("change", async () => {
   if (phase === "completed") await cancelSession();
   $("view-confirmed").checked = false;
   KineGuide.setSide($("side").value);
+  controls();
 });
 $("protocol").addEventListener("change", async () => {
   if (!["idle", "ready", "completed"].includes(phase)) return;
@@ -550,10 +837,25 @@ $("llm-draft").addEventListener("click", async () => {
   if (phase !== "completed" || llmBusy || !session || !protocol.harness_supported) return;
   const operation = epoch, currentSession = session;
   llmBusy = true; controls(); $("llm-status").textContent = "Préparation de la note…";
+  if (resultDocument) {
+    // Une tentative peut commencer côté serveur avant toute réponse HTTP.
+    resultDocument.llm_usage = null;
+    const wasOpen = $("result-technical").open;
+    showResultDiagnostics(resultDocument.measurement, resultDocument.motion, resultDocument.capture_monitor?.interrupted === true ||
+      resultDocument.capture_integrity?.interrupted === true);
+    $("result-technical").open = wasOpen;
+  }
   try {
     const response = await jsonPost("/api/harness/draft", { ...currentSession,
       model_id: $("llm-model").value, include_image: $("include-image").checked }, analysisLimits.draft_budget_ms + 5000);
     if (operation !== epoch) return;
+    if (resultDocument) {
+      resultDocument.llm_usage = safeLLMUsage(response.llm_usage);
+      const wasOpen = $("result-technical").open;
+      showResultDiagnostics(resultDocument.measurement, resultDocument.motion, resultDocument.capture_monitor?.interrupted === true ||
+        resultDocument.capture_integrity?.interrupted === true);
+      $("result-technical").open = wasOpen;
+    }
     $("llm-note").textContent = response.proposed_note || "Brouillon déterministe conservé";
     const fallbackLabels = { deadline_exceeded: "Délai de l’assistant dépassé · brouillon conservé",
       analysis_deadline_exceeded: "Délai de l’assistant dépassé · brouillon conservé",
@@ -561,7 +863,7 @@ $("llm-draft").addEventListener("click", async () => {
       inference_cancelled: "Analyse interrompue · brouillon conservé",
       cancelled: "Analyse interrompue · brouillon conservé", analysis_busy: "Assistant occupé · brouillon conservé" };
     $("llm-status").textContent = response.fallback_reason ? fallbackLabels[response.fallback_reason] || "Assistant indisponible · brouillon conservé" :
-      `Note à revoir${response.image_sent ? " · une image transmise localement" : " · aucune image transmise"}`;
+      `Note à revoir${response.image_sent ? " · contexte visuel disponible" : " · sans contexte visuel"}`;
   } catch (error) { if (operation === epoch) $("llm-status").textContent = error.name === "AbortError" ?
     "Délai de l’assistant dépassé · brouillon conservé" : message(error); }
   finally { if (operation === epoch) { llmBusy = false; controls(); } }
@@ -584,6 +886,7 @@ window.addEventListener("pagehide", () => {
 controls();
 request("/api/status").then((status) => {
   models = status.models || []; demo = status.pose_mode === "synthetic_demo";
+  analysisProvenance = safeProvenance(status.provenance);
   protocols = status.protocols?.length ? status.protocols : protocols;
   $("protocol").replaceChildren(...protocols.map((item) => {
     const option = document.createElement("option"); option.value = item.id; option.textContent = item.label; return option;

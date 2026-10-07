@@ -165,6 +165,96 @@ class BoundedHttpTests(unittest.TestCase):
         self.assertFalse(self.handler.inference_gate.is_busy())
         self.assertFalse(self.manager.live_is_current(session["session_id"], session["token"], 1))
 
+    def test_cancel_signals_llm_before_waiting_for_pose_manager_lock(self):
+        session = self.capture()
+        self.post("/api/harness/live/poll", {**session, "model_id": "gpt_oss", "control_version": 1})
+        self.assertTrue(self.model.entered.wait(1))
+        before_manager, release_manager = threading.Event(), threading.Event()
+        original_stop = self.handler.live_coordinator.stop
+
+        def blocked_manager_stop(*args, **kwargs):
+            before_manager.set()
+            if not release_manager.wait(2):
+                raise TimeoutError("test_manager_lock_timeout")
+            return original_stop(*args, **kwargs)
+
+        with patch.object(self.handler.live_coordinator, "stop", side_effect=blocked_manager_stop):
+            worker, results = self.run_background_post("/api/session/cancel", session, wait_for_model=False)
+            try:
+                self.assertTrue(before_manager.wait(1))
+                # L'HTTP cancel est encore en attente du gestionnaire, mais le
+                # contrôle du transport a déjà été révoqué, sans autre modèle.
+                self.assertTrue(self.model.cancelled.wait(0.2))
+                self.assertTrue(worker.is_alive())
+                release_manager.set()
+                worker.join(timeout=1)
+                self.assertEqual(results, [{"cancelled": True}])
+            finally:
+                release_manager.set()
+                worker.join(timeout=2)
+
+    def test_finish_cancels_live_call_acquired_before_capture_transition(self):
+        session = self.capture()
+        before_finish, resume_finish = threading.Event(), threading.Event()
+        allow_worker_exit = threading.Event()
+        original_finish = self.manager.finish
+        original_completion = self.model.complete_controlled
+
+        def delayed_finish(*args, **kwargs):
+            before_finish.set()
+            if not resume_finish.wait(2):
+                raise TimeoutError("test_finish_transition_timeout")
+            return original_finish(*args, **kwargs)
+
+        def cooperative_completion(*args, **kwargs):
+            try:
+                return original_completion(*args, **kwargs)
+            except InferenceCancelled:
+                # Le transport coopératif a observé l'annulation, mais son
+                # worker n'est pas encore sorti : sa réservation doit rester.
+                if not allow_worker_exit.wait(2):
+                    raise TimeoutError("test_cancelled_worker_exit_timeout")
+                raise
+
+        # Ce budget distingue la révocation testée d'une expiration ordinaire.
+        with patch.object(self.manager, "finish", side_effect=delayed_finish), \
+                patch.object(self.model, "complete_controlled", side_effect=cooperative_completion), \
+                patch.object(self.handler.live_coordinator, "_budget", 2):
+            worker, results = self.run_background_post(
+                "/api/session/finish", {**session, "view_confirmed": True, "camera_stable_confirmed": True},
+                wait_for_model=False,
+            )
+            try:
+                self.assertTrue(before_finish.wait(1))
+                self.assertFalse(self.handler.inference_gate.is_busy())
+                # Le dernier cancel préalable a déjà eu lieu. Un nouveau poll
+                # réserve un slot tant que la capture est encore active.
+                self.post("/api/harness/live/poll", {**session, "model_id": "gpt_oss", "control_version": 1})
+                self.assertTrue(self.model.entered.wait(1))
+                self.assertTrue(self.handler.inference_gate.is_busy())
+                self.assertEqual(self.model.calls, 1)
+                self.assertFalse(self.model.cancelled.is_set())
+                resume_finish.set()
+                worker.join(timeout=1)
+                self.assertFalse(worker.is_alive())
+                self.assertEqual(len(results), 1)
+                self.assertIn("measurement", results[0])
+                self.assertFalse(self.manager.get(**session).active)
+                self.assertTrue(self.model.cancelled.wait(0.5))
+                self.assertTrue(self.handler.inference_gate.is_busy())
+                self.assertIsNone(self.handler.live_coordinator._result)
+                allow_worker_exit.set()
+                deadline = time.monotonic() + 1
+                while self.handler.inference_gate.is_busy() and time.monotonic() < deadline:
+                    time.sleep(0.005)
+                self.assertFalse(self.handler.inference_gate.is_busy())
+                self.assertIsNone(self.handler.live_coordinator._result)
+                self.assertEqual(self.model.calls, 1)
+            finally:
+                resume_finish.set()
+                allow_worker_exit.set()
+                worker.join(timeout=2)
+
     def test_status_exposes_budgets_and_no_queue_without_internal_tokens(self):
         with self.opener.open(self.base + "/api/status", timeout=3) as response:
             status = json.load(response)

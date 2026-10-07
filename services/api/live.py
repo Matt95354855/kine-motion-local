@@ -50,6 +50,7 @@ class LiveHarnessCoordinator:
         result_ttl_seconds: float = 10,
         inference_gate: InferenceGate | None = None,
         analysis_budget_seconds: float = 10,
+        on_completion_start: Callable[[str, str, str, bool, list[dict]], None] | None = None,
     ) -> None:
         if (
             inference_interval_seconds < 0 or result_ttl_seconds <= 0
@@ -64,6 +65,7 @@ class LiveHarnessCoordinator:
         self._interval = inference_interval_seconds
         self._ttl = result_ttl_seconds
         self._budget = analysis_budget_seconds
+        self._on_completion_start = on_completion_start
         self._inference_gate = inference_gate if inference_gate is not None else InferenceGate()
         self._lock = RLock()
         self._configuration: _Configuration | None = None
@@ -236,7 +238,13 @@ class LiveHarnessCoordinator:
             if not self._continues(job):
                 return
             job.control.check()
-            controlled_client = ControlledChatClient(client, job.control) if client is not None else None
+            callback = None
+            if self._on_completion_start is not None:
+                configuration = job.configuration
+                callback = lambda messages: self._on_completion_start(
+                    configuration.session_id, configuration.token, configuration.model_id,
+                    configuration.include_image, messages)
+            controlled_client = ControlledChatClient(client, job.control, callback) if client is not None else None
             result = run_live_harness(
                 snapshot,
                 controlled_client,
