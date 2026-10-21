@@ -6,10 +6,6 @@
 
 [English](README.md) · [Français](README.fr.md)
 
-![Essai de flexion du coude en mode démo : repères suivis, angle en direct et guide du geste](docs/images/demo-trial.jpg)
-
-<sub>Mode démo (`--demo`) : les repères sont synthétiques, pour essayer l'interface et la chaîne de capture sans GPU ni modèle de pose.</sub>
-
 ## Points forts
 
 - **7 mouvements guidés** — flexion du coude, du genou, de la hanche, élévation latérale de l'épaule, inclinaison du tronc et du cou, rotation guidée du cou — chacun avec sa vue caméra, ses repères et sa définition d'angle.

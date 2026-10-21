@@ -6,10 +6,6 @@
 
 [English](README.md) · [Français](README.fr.md)
 
-![Elbow flexion trial in demo mode: tracked landmarks, live angle and movement guide](docs/images/demo-trial.jpg)
-
-<sub>Demo mode (`--demo`): landmarks are synthetic, so the UI and capture pipeline can be tried without a GPU or a pose model.</sub>
-
 ## Highlights
 
 - **7 guided movements** — elbow, knee, hip flexion, shoulder abduction, trunk and neck side-bending, guided neck rotation — each with its own camera view, landmarks and angle definition.
