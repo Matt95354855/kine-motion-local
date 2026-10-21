@@ -2,7 +2,7 @@
 
 **Analyse d'angles articulaires par webcam, entièrement sur votre machine.** L'estimation de pose en temps réel (MediaPipe) mesure sept mouvements de kinésithérapie en 2D, et un LLM local optionnel (GPT-OSS / Qwen 3.6) commente la qualité du suivi — sans cloud, sans vidéo écrite sur disque.
 
-[![Tests](https://github.com/Matt95354855/kine-motion-local/actions/workflows/tests.yml/badge.svg)](https://github.com/Matt95354855/kine-motion-local/actions/workflows/tests.yml) ![Python](https://img.shields.io/badge/Python-3.11-3776AB) ![JavaScript](https://img.shields.io/badge/frontend-vanilla%20JS-F7DF1E) ![Pose](https://img.shields.io/badge/pose-MediaPipe-0097A7) ![Status](https://img.shields.io/badge/statut-prototype%20de%20recherche-orange)
+[![Tests](https://github.com/Matt95354855/kine-motion-local/actions/workflows/tests.yml/badge.svg)](https://github.com/Matt95354855/kine-motion-local/actions/workflows/tests.yml) ![Python](https://img.shields.io/badge/Python-3.11-3776AB) ![JavaScript](https://img.shields.io/badge/frontend-vanilla%20JS-F7DF1E) ![Pose](https://img.shields.io/badge/pose-MediaPipe-0097A7) ![Status](https://img.shields.io/badge/statut-prototype%20de%20recherche-orange) ![License](https://img.shields.io/badge/licence-MIT-green)
 
 [English](README.md) · [Français](README.fr.md)
 
@@ -59,3 +59,7 @@ Prototype de recherche, **pas un dispositif médical** : les projections 2D ne s
 ## Documentation
 
 [Guide détaillé](docs/GUIDE.fr.md) · [Protocoles de mouvement](docs/movement-protocols.md) · [Deux machines](docs/two-machine-setup.md) · [Harness en direct](docs/live-harness.md) · [Matrice d'acceptation](docs/acceptance-matrix.md)
+
+## Licence
+
+MIT — voir [LICENSE](LICENSE).

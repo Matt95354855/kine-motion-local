@@ -2,7 +2,7 @@
 
 **Webcam-based joint-angle analysis that runs entirely on your own machine.** Real-time pose estimation (MediaPipe) measures seven physiotherapy movements in 2D, and an optional local LLM (GPT-OSS / Qwen 3.6) comments on tracking quality — no cloud, no video written to disk.
 
-[![Tests](https://github.com/Matt95354855/kine-motion-local/actions/workflows/tests.yml/badge.svg)](https://github.com/Matt95354855/kine-motion-local/actions/workflows/tests.yml) ![Python](https://img.shields.io/badge/Python-3.11-3776AB) ![JavaScript](https://img.shields.io/badge/frontend-vanilla%20JS-F7DF1E) ![Pose](https://img.shields.io/badge/pose-MediaPipe-0097A7) ![Status](https://img.shields.io/badge/status-research%20prototype-orange)
+[![Tests](https://github.com/Matt95354855/kine-motion-local/actions/workflows/tests.yml/badge.svg)](https://github.com/Matt95354855/kine-motion-local/actions/workflows/tests.yml) ![Python](https://img.shields.io/badge/Python-3.11-3776AB) ![JavaScript](https://img.shields.io/badge/frontend-vanilla%20JS-F7DF1E) ![Pose](https://img.shields.io/badge/pose-MediaPipe-0097A7) ![Status](https://img.shields.io/badge/status-research%20prototype-orange) ![License](https://img.shields.io/badge/license-MIT-green)
 
 [English](README.md) · [Français](README.fr.md)
 
@@ -59,3 +59,7 @@ Research prototype, **not a medical device**: 2D projections are not validated c
 ## Documentation
 
 [Detailed guide (FR)](docs/GUIDE.fr.md) · [Movement protocols](docs/movement-protocols.md) · [Two-machine setup](docs/two-machine-setup.md) · [Live harness](docs/live-harness.md) · [Acceptance matrix](docs/acceptance-matrix.md)
+
+## License
+
+MIT — see [LICENSE](LICENSE).
