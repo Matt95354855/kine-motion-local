@@ -1,8 +1,8 @@
-# Kiné Motion Local
+# Kiné Motion — pose analysis
 
 **Webcam-based joint-angle analysis that runs entirely on your own machine.** Real-time pose estimation (MediaPipe) measures seven physiotherapy movements in 2D, and an optional local LLM (GPT-OSS / Qwen 3.6) comments on tracking quality — no cloud, no video written to disk.
 
-[![Tests](https://github.com/Matt95354855/kine-motion-local/actions/workflows/tests.yml/badge.svg)](https://github.com/Matt95354855/kine-motion-local/actions/workflows/tests.yml) ![Python](https://img.shields.io/badge/Python-3.11-3776AB) ![JavaScript](https://img.shields.io/badge/frontend-vanilla%20JS-F7DF1E) ![Pose](https://img.shields.io/badge/pose-MediaPipe-0097A7) ![Status](https://img.shields.io/badge/status-research%20prototype-orange) ![License](https://img.shields.io/badge/license-MIT-green)
+[![Tests](https://github.com/Matt95354855/kine-motion-pose-analysis/actions/workflows/tests.yml/badge.svg)](https://github.com/Matt95354855/kine-motion-pose-analysis/actions/workflows/tests.yml) ![Python](https://img.shields.io/badge/Python-3.11-3776AB) ![JavaScript](https://img.shields.io/badge/frontend-vanilla%20JS-F7DF1E) ![Pose](https://img.shields.io/badge/pose-MediaPipe-0097A7) ![Status](https://img.shields.io/badge/status-research%20prototype-orange) ![License](https://img.shields.io/badge/license-MIT-green)
 
 [English](README.md) · [Français](README.fr.md)
 
@@ -32,8 +32,8 @@ The webcam machine and the GPU machine can be two computers joined by an encrypt
 ## Quick start
 
 ```bash
-git clone https://github.com/Matt95354855/kine-motion-local.git
-cd kine-motion-local
+git clone https://github.com/Matt95354855/kine-motion-pose-analysis.git
+cd kine-motion-pose-analysis
 python -m scripts.start_local --demo      # then open http://127.0.0.1:8765
 ```
 

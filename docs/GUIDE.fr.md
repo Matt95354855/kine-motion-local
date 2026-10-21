@@ -91,8 +91,8 @@ Effectuer l'installation **avant** une séance, avec Internet. Le profil testé 
 Python 3.11.14 n'a pas d'installateur Windows fourni par Python.org ; les versions 3.11 récentes sont publiées sous forme de sources. Pour conserver la même version sans revenir à un ancien Python, utiliser un petit environnement d'installation isolé et le runtime géré par uv. Un Python déjà disponible via `py` sert seulement à préparer cet environnement. [Source Python](https://www.python.org/downloads/release/python-31114/), [installation uv](https://docs.astral.sh/uv/getting-started/installation/).
 
 ```powershell
-git clone https://github.com/Matt95354855/kine-motion-local.git
-cd kine-motion-local
+git clone https://github.com/Matt95354855/kine-motion-pose-analysis.git
+cd kine-motion-pose-analysis
 py -m venv .setup
 .\.setup\Scripts\python.exe -m pip install uv==0.9.8
 .\.setup\Scripts\python.exe -m uv python install 3.11.14
@@ -106,8 +106,8 @@ py -m venv .setup
 ### Linux / macOS
 
 ```sh
-git clone https://github.com/Matt95354855/kine-motion-local.git
-cd kine-motion-local
+git clone https://github.com/Matt95354855/kine-motion-pose-analysis.git
+cd kine-motion-pose-analysis
 python3.11 -m venv .venv
 .venv/bin/python -m pip install --require-hashes -r infra/requirements-pose.lock
 .venv/bin/python -m scripts.prepare_pose --download
@@ -157,9 +157,9 @@ python -m scripts.benchmark_pose --frames 30
 
 Le microbenchmark utilise **des images vides** : ses chiffres ne représentent ni le suivi d'une personne ni les performances GPU/LLM. Le diagnostic affiche uniquement des informations techniques locales ; aucune photo, aucune identité, aucun secret.
 
-Le socle multi-protocoles/tunnel avait **42 tests Python et 18 tests JavaScript réussis**, sur le Mac Intel puis [en CI Linux/Windows pour le commit 30fc285](https://github.com/Matt95354855/kine-motion-local/actions/runs/37003791595), sans poids ni GPU. Les nouveaux tests live couvrent la mémoire courte, les outils, les limites, le consentement, les réponses mal formées, les arrêts et les courses entre requêtes ; voir [les vérifications du harness continu](live-harness.md). Les tests physiques webcam, SSH entre tes postes, mouvements réels, serveurs LLM/FP4, mode hors réseau et RTX ne constituent pas des validations acquises.
+Le socle multi-protocoles/tunnel avait **42 tests Python et 18 tests JavaScript réussis**, sur le Mac Intel puis [en CI Linux/Windows pour le commit 30fc285](https://github.com/Matt95354855/kine-motion-pose-analysis/actions/runs/37003791595), sans poids ni GPU. Les nouveaux tests live couvrent la mémoire courte, les outils, les limites, le consentement, les réponses mal formées, les arrêts et les courses entre requêtes ; voir [les vérifications du harness continu](live-harness.md). Les tests physiques webcam, SSH entre tes postes, mouvements réels, serveurs LLM/FP4, mode hors réseau et RTX ne constituent pas des validations acquises.
 
-Livraison du **6 octobre 2026 : 158 tests Python + 56 tests JavaScript réussis, soit 214 tests**, dont 16 nouveaux tests de la note finale et trois régressions sur les délais socket Windows. Syntaxe JavaScript et diff vérifiés ; scan de 85 fichiers sans artefact interdit ni secret usuel détecté (non exhaustif). Vérifications locales sur Python 3.11.14, sans webcam, LLM ni GPU réels. Consulter [GitHub Actions pour cette branche](https://github.com/Matt95354855/kine-motion-local/actions?query=branch%3Acamera-guidance-local) et comparer le SHA testé, plutôt que réutiliser la preuve d'un ancien commit.
+Livraison du **6 octobre 2026 : 158 tests Python + 56 tests JavaScript réussis, soit 214 tests**, dont 16 nouveaux tests de la note finale et trois régressions sur les délais socket Windows. Syntaxe JavaScript et diff vérifiés ; scan de 85 fichiers sans artefact interdit ni secret usuel détecté (non exhaustif). Vérifications locales sur Python 3.11.14, sans webcam, LLM ni GPU réels. Consulter [GitHub Actions pour cette branche](https://github.com/Matt95354855/kine-motion-pose-analysis/actions?query=branch%3Acamera-guidance-local) et comparer le SHA testé, plutôt que réutiliser la preuve d'un ancien commit.
 
 Livraison complète du **7 octobre : 215 tests Python + 92 tests JavaScript réussis, soit 307 tests**. Syntaxe et diff vérifiés ; scan de 93 fichiers sans artefact interdit ni secret usuel détecté (non exhaustif). Les détails sont dans [le suivi du 7 octobre](progress-2026-10-07.md). Les poses, médias et services de ces tests sont simulés. Aucun nouvel essai webcam, GPU, LLM réel ou connexion au Windows n'est acquis ici ; consulter la CI du SHA exact après publication.
 
